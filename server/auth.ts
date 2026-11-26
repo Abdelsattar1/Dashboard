@@ -74,12 +74,27 @@ export function verifyToken(token: string): TokenPayload | null {
   }
 }
 
+export class AuthorizationError extends Error {
+  status = 403;
+  constructor(message: string) {
+    super(message);
+    this.name = 'AuthorizationError';
+  }
+}
+
+export function normalizeUserRole(raw: unknown): UserRole {
+  const val = String(raw || '').trim();
+  if (val === 'admin') return 'admin';
+  if (val === 'sector_manager') return 'sector_manager';
+  return 'standard_user';
+}
+
 export interface DbUserRow {
   id: number;
   username: string;
   full_name: string;
   email: string | null;
-  role: UserRole;
+  role: string;
   allowed_sectors: string;
   password_hash: string;
   must_change_password: number;
@@ -103,7 +118,7 @@ export function mapDbUserToProfile(row: DbUserRow): UserProfile {
     username: row.username,
     fullName: row.full_name,
     email: row.email,
-    role: row.role,
+    role: normalizeUserRole(row.role),
     allowedSectors,
     isActive: row.is_active === 1,
     mustChangePassword: row.must_change_password === 1,
@@ -146,7 +161,15 @@ export function createAuthMiddleware(db: Database.Database) {
 
 export function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   if (!req.user || req.user.role !== 'admin') {
-    res.status(403).json({ error: 'هذه العملية متاحة لمدير النظام فقط' });
+    res.status(403).json({ error: 'هذه العملية متاحة لمدير النظام (Admin) فقط' });
+    return;
+  }
+  next();
+}
+
+export function requireTargetEditor(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  if (!req.user || (req.user.role !== 'admin' && req.user.role !== 'sector_manager')) {
+    res.status(403).json({ error: 'تعديل الأهداف متاح للأدمن ومدير القطاع أو الإدارة فقط' });
     return;
   }
   next();

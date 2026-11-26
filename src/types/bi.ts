@@ -1,5 +1,5 @@
 export type SalesSource = 'VF05N' | 'ZSALES';
-export type UserRole = 'admin' | 'sector_user';
+export type UserRole = 'admin' | 'sector_manager' | 'standard_user';
 
 export interface UserProfile {
   id: number;

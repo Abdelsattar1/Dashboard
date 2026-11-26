@@ -35,6 +35,8 @@ interface ItemsViewProps {
   endDate: string;
   filterResetSignal?: number;
   isAdmin: boolean;
+  canEditTargets: boolean;
+  authorizedSectors: string[];
   loading: boolean;
   onRefresh: () => void;
 }
@@ -78,6 +80,8 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
   endDate,
   filterResetSignal = 0,
   isAdmin,
+  canEditTargets,
+  authorizedSectors,
   loading,
   onRefresh,
 }) => {
@@ -190,16 +194,26 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
     });
   }, [rows, drafts]);
 
+  const canEditRowTarget = (row: ItemCategoryAnalysisRow): boolean => {
+    if (!canEditTargets || row.isAutoTarget) return false;
+    if (isAdmin) return true;
+    const rowSectors = row.sectorName
+      .split('+')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return rowSectors.length > 0 && rowSectors.every((s) => authorizedSectors.includes(s));
+  };
+
   const dirtyRows = useMemo(() => {
     return rows.filter((r) => {
-      if (r.isAutoTarget) return false;
+      if (!canEditRowTarget(r)) return false;
       const raw = drafts[r.targetKey];
       if (raw === undefined) return false;
       const parsed = raw.trim() === '' ? 0 : Number(raw.trim());
       if (!Number.isFinite(parsed)) return true;
       return Number(parsed.toFixed(2)) !== Number(r.target.toFixed(2));
     });
-  }, [rows, drafts]);
+  }, [rows, drafts, canEditTargets, isAdmin, authorizedSectors]);
 
   // Cascading Employee / Rep options strictly derived from rows matching active Sector + Job Title
   const employeeOptions = useMemo(() => {
@@ -811,7 +825,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
               />
             </div>
 
-            {isAdmin && (
+            {canEditTargets && (
               <div className="flex items-center gap-2">
                 {dirtyRows.length > 0 && (
                   <button
@@ -955,7 +969,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                             </span>
                             <span className="text-[11px] text-slate-500">تجميع تلقائي (التوريد المركزي)</span>
                           </div>
-                        ) : isAdmin ? (
+                        ) : canEditRowTarget(r) ? (
                           <input
                             type="number"
                             min="0"

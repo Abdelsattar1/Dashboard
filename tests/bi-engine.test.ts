@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import Database from 'better-sqlite3';
 import * as XLSX from 'xlsx';
 import {
   calculateAchievementPct,
@@ -9,6 +13,7 @@ import {
   getRepsAnalytics,
   saveItemCategoryTargets,
 } from '../server/analytics-engine.ts';
+import { AuthorizationError } from '../server/auth.ts';
 import {
   calculateQtyAchievementPct,
   createCompetition,
@@ -269,9 +274,9 @@ function runTests() {
   const directUser: UserProfile = {
     id: 2,
     username: 'direct.user',
-    fullName: 'مدير المباشر',
+    fullName: 'مستخدم المباشر',
     email: 'direct@test.com',
-    role: 'sector_user',
+    role: 'standard_user',
     allowedSectors: ['التوريد المباشر'],
     isActive: true,
     createdAt: '2026-11-23T00:00:00Z',
@@ -359,7 +364,7 @@ function runTests() {
     username: 'chains.mgr',
     fullName: 'مدير السلاسل',
     email: 'chains@test.com',
-    role: 'sector_user',
+    role: 'sector_manager',
     allowedSectors: ['التوريد المباشر', 'التوريد المركزي'],
     isActive: true,
     createdAt: '2026-11-23T00:00:00Z',
@@ -1982,7 +1987,201 @@ function runTests() {
   assert.equal(centralSupUnified.rows.find((r) => r.employeeName === 'أحمد سيد' && r.categoryName === 'مشروبات ساخنة')!.sales, 15000);
   assert.equal(centralSupUnified.rows.find((r) => r.employeeName === 'كمال رضا' && r.categoryName === 'بسكويت + حلويات')!.sales, 35000);
 
-  console.log('All Sales BI Engine tests PASSED (19/19 assertion groups verified).');
+  // 20. Verify 3-Role RBAC (admin, sector_manager, standard_user), sector-scoped target writes, Excel role parsing & SQLite migration
+  const directMgrUser: UserProfile = {
+    id: 10,
+    username: 'direct.mgr',
+    fullName: 'مدير التوريد المباشر',
+    email: null,
+    role: 'sector_manager',
+    allowedSectors: ['التوريد المباشر'],
+    isActive: true,
+    createdAt: '2026-11-26T00:00:00Z',
+  };
+  const directStandardUser: UserProfile = {
+    id: 11,
+    username: 'direct.viewer',
+    fullName: 'مستخدم التوريد المباشر',
+    email: null,
+    role: 'standard_user',
+    allowedSectors: ['التوريد المباشر'],
+    isActive: true,
+    createdAt: '2026-11-26T00:00:00Z',
+  };
+
+  // Both sector_manager and standard_user only see their authorized sector in items analytics
+  const mgrItemsView = getItemCategoriesAnalytics(db, directMgrUser, { source: 'ZSALES' });
+  assert.ok(mgrItemsView.rows.length > 0);
+  assert.ok(mgrItemsView.rows.every((r) => r.sectorName === 'التوريد المباشر'));
+
+  const viewerItemsView = getItemCategoriesAnalytics(db, directStandardUser, { source: 'ZSALES' });
+  assert.equal(viewerItemsView.rows.length, mgrItemsView.rows.length);
+
+  // sector_manager CAN save targets inside their authorized sector
+  saveItemCategoryTargets(
+    db,
+    [
+      {
+        sectorName: 'التوريد المباشر',
+        jobTitle: 'مدير قطاع',
+        employeeName: 'حازم السيد',
+        categoryName: 'بسكويت + حلويات',
+        targetValue: 75000,
+      },
+    ],
+    directMgrUser
+  );
+  const afterMgrSave = getItemCategoriesAnalytics(db, directMgrUser, { source: 'ZSALES', jobTitle: 'مدير قطاع' });
+  assert.equal(
+    afterMgrSave.rows.find((r) => r.employeeName === 'حازم السيد' && r.categoryName === 'بسكويت + حلويات')?.target,
+    75000
+  );
+
+  // sector_manager MUST be rejected (403 AuthorizationError) for sectors outside their scope
+  assert.throws(
+    () =>
+      saveItemCategoryTargets(
+        db,
+        [
+          {
+            sectorName: 'التوريد المركزي',
+            jobTitle: 'مدير قطاع',
+            employeeName: 'مصطفى مناع',
+            categoryName: 'بسكويت + حلويات',
+            targetValue: 99999,
+          },
+        ],
+        directMgrUser
+      ),
+    AuthorizationError
+  );
+  assert.throws(
+    () =>
+      saveItemCategoryTargets(
+        db,
+        [
+          {
+            sectorName: 'التوريد المباشر + الجيش + التوب ريتيل',
+            jobTitle: 'مدير إدارة',
+            employeeName: 'عبدالستار مصطفى',
+            categoryName: 'بسكويت + حلويات',
+            targetValue: 99999,
+          },
+        ],
+        directMgrUser
+      ),
+    AuthorizationError
+  );
+
+  // standard_user MUST be rejected (403 AuthorizationError) from modifying targets even in their own sector
+  assert.throws(
+    () =>
+      saveItemCategoryTargets(
+        db,
+        [
+          {
+            sectorName: 'التوريد المباشر',
+            jobTitle: 'مدير قطاع',
+            employeeName: 'حازم السيد',
+            categoryName: 'بسكويت + حلويات',
+            targetValue: 12345,
+          },
+        ],
+        directStandardUser
+      ),
+    AuthorizationError
+  );
+
+  // Competition targets RBAC check
+  const rbacComp = createCompetition(db, { id: 1 }, { name: 'مسابقة الصلاحيات', items: [{ itemCode: 'U-1', equivalentFactor: 1 }] });
+  saveCompetitionTargets(db, rbacComp.id, [{ participantKey: 'REP::التوريد المباشر::401', targetQty: 150 }], directMgrUser);
+  assert.throws(
+    () =>
+      saveCompetitionTargets(
+        db,
+        rbacComp.id,
+        [{ participantKey: 'REP::التوريد المركزي::403', targetQty: 200 }],
+        directMgrUser
+      ),
+    AuthorizationError
+  );
+  assert.throws(
+    () =>
+      saveCompetitionTargets(
+        db,
+        rbacComp.id,
+        [{ participantKey: 'REP::التوريد المباشر::401', targetQty: 300 }],
+        directStandardUser
+      ),
+    AuthorizationError
+  );
+
+  // Excel users sheet parses 3 roles accurately
+  const rolesWb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(rolesWb, XLSX.utils.aoa_to_sheet([['كود القطاع', 'القطاع'], ['S1', 'التوريد المباشر']]), 'القطاعات');
+  XLSX.utils.book_append_sheet(rolesWb, XLSX.utils.aoa_to_sheet([['القطاع', 'الهدف'], ['التوريد المباشر', 1000]]), 'اهداف القطاعات');
+  XLSX.utils.book_append_sheet(rolesWb, XLSX.utils.aoa_to_sheet([['كود السلسلة', 'اسم السلسلة', 'الادارة', 'القطاع'], ['101', 'عميل', 'إدارة', 'التوريد المباشر']]), 'تعريف الادارات والقطاعات');
+  XLSX.utils.book_append_sheet(rolesWb, XLSX.utils.aoa_to_sheet([['كود الفرع', 'اسم الفرع', 'القطاع', 'الهدف'], ['501', 'فرع', 'التوريد المباشر', 1000]]), 'تعريف الفروع و الاهداف');
+  XLSX.utils.book_append_sheet(rolesWb, XLSX.utils.aoa_to_sheet([['كود المندوب', 'اسم المندوب', 'القطاع'], ['R1', 'مندوب', 'التوريد المباشر']]), 'تعريف مندوبى البيع');
+  XLSX.utils.book_append_sheet(rolesWb, XLSX.utils.aoa_to_sheet([['كود الصنف', 'اسم الصنف'], ['M1', 'صنف']]), 'تعريف الاصناف');
+  XLSX.utils.book_append_sheet(
+    rolesWb,
+    XLSX.utils.aoa_to_sheet([
+      ['اسم المستخدم', 'الاسم الكامل', 'الدور', 'الصلاحيات'],
+      ['sys.admin', 'مدير النظام', 'أدمن', 'الكل'],
+      ['sec.mgr', 'مدير المباشر', 'مدير قطاع', 'التوريد المباشر'],
+      ['std.view', 'مستخدم المباشر', 'مستخدم', 'التوريد المباشر'],
+    ]),
+    'تعريف المستخدمين'
+  );
+  XLSX.utils.book_append_sheet(rolesWb, XLSX.utils.aoa_to_sheet([['Sold-to Party', 'Payer', 'Billing Date', 'Sales Employee Code', 'Material', 'New Total Tax', 'New Growth Value BD&T'], ['501', '101', '2026-11-15', 'R1', 'M1', 14, 100]]), 'VF05N (2)');
+  XLSX.utils.book_append_sheet(rolesWb, XLSX.utils.aoa_to_sheet([['Billing Dt.', 'Customer', 'Material', 'Sales Emp.', 'Qty', 'Total Tax', 'New Growth Value BD&T'], [46341, '101', 'M1', 'R1', 1, 14, 100]]), 'Zsales_Price (2)');
+  const rolesReport = validateExcelBuffer(XLSX.write(rolesWb, { type: 'buffer', bookType: 'xlsx' }) as Buffer, 'Roles_Test.xlsx');
+  assert.equal(rolesReport.usersFound.find((u) => u.username === 'sys.admin')?.role, 'admin');
+  assert.equal(rolesReport.usersFound.find((u) => u.username === 'sec.mgr')?.role, 'sector_manager');
+  assert.equal(rolesReport.usersFound.find((u) => u.username === 'std.view')?.role, 'standard_user');
+
+  // Legacy SQLite database with CHECK(role IN ('admin', 'sector_user')) migrates cleanly via initDatabase
+  const tmpDbPath = path.join(os.tmpdir(), `rbac_migrate_${Date.now()}.db`);
+  try {
+    const legacyDb = new Database(tmpDbPath);
+    legacyDb.exec(`
+      CREATE TABLE users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        full_name TEXT NOT NULL,
+        email TEXT,
+        role TEXT NOT NULL CHECK(role IN ('admin', 'sector_user')),
+        allowed_sectors TEXT NOT NULL DEFAULT '[]',
+        password_hash TEXT NOT NULL,
+        must_change_password INTEGER NOT NULL DEFAULT 0,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO users (username, full_name, role, allowed_sectors, password_hash, created_at)
+      VALUES
+        ('old.admin', 'Old Admin', 'admin', '[]', 'salt:hash', '2026-11-01T00:00:00Z'),
+        ('old.user', 'Old Sector User', 'sector_user', '["التوريد المباشر"]', 'salt:hash', '2026-11-01T00:00:00Z');
+    `);
+    legacyDb.close();
+
+    const migratedDb = initDatabase(tmpDbPath);
+    const oldAdminRow = migratedDb.prepare(`SELECT role FROM users WHERE username = 'old.admin'`).get() as { role: string };
+    const oldUserRow = migratedDb.prepare(`SELECT role FROM users WHERE username = 'old.user'`).get() as { role: string };
+    assert.equal(oldAdminRow.role, 'admin');
+    assert.equal(oldUserRow.role, 'standard_user');
+    migratedDb
+      .prepare(
+        `INSERT INTO users (username, full_name, role, allowed_sectors, password_hash, created_at)
+         VALUES ('new.mgr', 'Sector Manager', 'sector_manager', '["التوريد المباشر"]', 'salt:hash', '2026-11-26T00:00:00Z')`
+      )
+      .run();
+    migratedDb.close();
+  } finally {
+    if (fs.existsSync(tmpDbPath)) fs.unlinkSync(tmpDbPath);
+  }
+
+  console.log('All Sales BI Engine tests PASSED (20/20 assertion groups verified).');
 }
 
 runTests();

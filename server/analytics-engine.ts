@@ -25,6 +25,7 @@ import {
   ORIGINAL_SECTORS,
   stripLeadingZeros,
 } from './excel-engine.ts';
+import { AuthorizationError } from './auth.ts';
 
 export function calculateAchievementPct(sales: number, target: number, tax: number): number | null {
   const denominator = target - tax;
@@ -1878,8 +1879,26 @@ export interface ItemCategoryTargetInput {
 
 export function saveItemCategoryTargets(
   db: Database.Database,
-  targets: ItemCategoryTargetInput[]
+  targets: ItemCategoryTargetInput[],
+  user?: UserProfile
 ): void {
+  if (user && user.role !== 'admin') {
+    if (user.role !== 'sector_manager') {
+      throw new AuthorizationError('صلاحية إدخال وتعديل الأهداف متاحة للأدمن ومدير القطاع أو الإدارة فقط');
+    }
+    const authSet = new Set(resolveAuthorizedSectors(user));
+    for (const item of targets) {
+      const rawSec = String(item.sectorName || '').trim();
+      const parts = rawSec
+        .split('+')
+        .map((p) => canonicalizeSectorName(p.trim()))
+        .filter(Boolean);
+      if (parts.length === 0 || parts.some((s) => !authSet.has(s))) {
+        throw new AuthorizationError('غير مصرح لك بتعديل أهداف قطاع خارج نطاق صلاحياتك');
+      }
+    }
+  }
+
   const now = new Date().toISOString();
   const tx = db.transaction(() => {
     const stmt = db.prepare(
@@ -2808,10 +2827,10 @@ export function getItemCategoriesAnalytics(
   }
 
   for (const dm of deptMgrMap.values()) {
-    const authManaged =
-      user.role === 'admin'
-        ? dm.managedSectors
-        : dm.managedSectors.filter((s) => authSectorSet.has(s));
+    if (user.role !== 'admin' && !dm.managedSectors.every((s) => authSectorSet.has(s))) {
+      continue;
+    }
+    const authManaged = dm.managedSectors;
     if (authManaged.length === 0) continue;
 
     const fallbackCats = dm.isRafat

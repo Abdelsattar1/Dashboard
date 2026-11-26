@@ -14,6 +14,7 @@ import {
   ORIGINAL_SECTORS,
   stripLeadingZeros,
 } from './excel-engine.ts';
+import { AuthorizationError } from './auth.ts';
 
 function isSalesRepJobTitle(jobTitle: string): boolean {
   return normalizeArabic(jobTitle).includes('مندوب');
@@ -302,11 +303,33 @@ export function deleteCompetition(db: Database.Database, competitionId: number):
 export function saveCompetitionTargets(
   db: Database.Database,
   competitionId: number,
-  targets: Array<{ participantKey: string; targetQty: number }>
+  targets: Array<{ participantKey: string; targetQty: number }>,
+  user?: UserProfile
 ): void {
   const exists = db.prepare(`SELECT id FROM competitions WHERE id = ?`).get(competitionId);
   if (!exists) {
     throw new Error('المسابقة غير موجودة');
+  }
+
+  if (user && user.role !== 'admin') {
+    if (user.role !== 'sector_manager') {
+      throw new AuthorizationError('صلاحية تعديل أهداف المسابقات متاحة للأدمن ومدير القطاع أو الإدارة فقط');
+    }
+    const authSet = new Set(resolveAuthorizedSectors(user));
+    for (const row of targets) {
+      const key = String(row.participantKey || '').trim();
+      if (!key) continue;
+      const parts = key.split('::');
+      const prefix = parts[0];
+      const rawSec = parts[1];
+      if (!['REP', 'SUP', 'SEC_MGR'].includes(prefix) || !rawSec) {
+        throw new AuthorizationError('غير مصرح لك بتعديل هذا الهدف خارج نطاق صلاحياتك');
+      }
+      const canonSec = canonicalizeSectorName(rawSec);
+      if (!canonSec || !authSet.has(canonSec)) {
+        throw new AuthorizationError('غير مصرح لك بتعديل أهداف قطاع خارج نطاق صلاحياتك');
+      }
+    }
   }
 
   const now = new Date().toISOString();
@@ -798,7 +821,9 @@ export function getCompetitionAnalytics(
     const noSpace = normalizeArabic(cleanName).replace(/\s+/g, '');
     if (!noSpace) return;
     if (deptMgrMap.has(noSpace)) return;
-    const managedSectors = resolveDepartmentManagerSectors(cleanName, rawSector).filter((s) => authSet.has(s));
+    const allManagedSectors = resolveDepartmentManagerSectors(cleanName, rawSector);
+    if (user.role !== 'admin' && !allManagedSectors.every((s) => authSet.has(s))) return;
+    const managedSectors = allManagedSectors.filter((s) => authSet.has(s));
     if (managedSectors.length === 0) return;
 
     let targetQty = 0;

@@ -35,7 +35,7 @@ export function initDatabase(customPath?: string): Database.Database {
       username TEXT UNIQUE NOT NULL,
       full_name TEXT NOT NULL,
       email TEXT,
-      role TEXT NOT NULL CHECK(role IN ('admin', 'sector_user')),
+      role TEXT NOT NULL CHECK(role IN ('admin', 'sector_manager', 'standard_user')),
       allowed_sectors TEXT NOT NULL DEFAULT '[]',
       password_hash TEXT NOT NULL,
       must_change_password INTEGER NOT NULL DEFAULT 0,
@@ -246,6 +246,61 @@ export function initDatabase(customPath?: string): Database.Database {
   const batchCols = db.prepare(`PRAGMA table_info(import_batches)`).all() as Array<{ name: string }>;
   if (!batchCols.some((c) => c.name === 'has_category_targets_sheet')) {
     db.exec(`ALTER TABLE import_batches ADD COLUMN has_category_targets_sheet INTEGER NOT NULL DEFAULT 0`);
+  }
+
+  // Idempotent migration: upgrade users table CHECK constraint to ('admin', 'sector_manager', 'standard_user')
+  const usersSchemaRow = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'`)
+    .get() as { sql?: string } | undefined;
+  const usersSchemaSql = usersSchemaRow?.sql ?? '';
+  if (
+    usersSchemaSql &&
+    (!usersSchemaSql.includes("'sector_manager'") || !usersSchemaSql.includes("'standard_user'"))
+  ) {
+    db.pragma('foreign_keys = OFF');
+    try {
+      const migrateUsers = db.transaction(() => {
+        db.exec(`
+          CREATE TABLE users_migrated (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            full_name TEXT NOT NULL,
+            email TEXT,
+            role TEXT NOT NULL CHECK(role IN ('admin', 'sector_manager', 'standard_user')),
+            allowed_sectors TEXT NOT NULL DEFAULT '[]',
+            password_hash TEXT NOT NULL,
+            must_change_password INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+          );
+          INSERT INTO users_migrated (
+            id, username, full_name, email, role, allowed_sectors,
+            password_hash, must_change_password, is_active, created_at
+          )
+          SELECT
+            id,
+            username,
+            full_name,
+            email,
+            CASE
+              WHEN role = 'admin' THEN 'admin'
+              WHEN role = 'sector_manager' THEN 'sector_manager'
+              ELSE 'standard_user'
+            END,
+            allowed_sectors,
+            password_hash,
+            must_change_password,
+            is_active,
+            created_at
+          FROM users;
+          DROP TABLE users;
+          ALTER TABLE users_migrated RENAME TO users;
+        `);
+      });
+      migrateUsers();
+    } finally {
+      db.pragma('foreign_keys = ON');
+    }
   }
 
   if (!customPath) {

@@ -1226,8 +1226,8 @@ export function validateExcelBuffer(buffer: Buffer, filename: string): ImportVal
     const colUser = findColumnHeader(usersTable.headers, ['اسم المستخدم', 'المستخدم', 'Username', 'كود المستخدم', 'Email', 'البريد الإلكتروني']);
     const colName = findColumnHeader(usersTable.headers, ['الاسم', 'الاسم الكامل', 'Full Name', 'اسم الموظف']);
     const colEmail = findColumnHeader(usersTable.headers, ['البريد الإلكتروني', 'Email', 'البريد']);
-    const colRole = findColumnHeader(usersTable.headers, ['الصلاحية', 'الصلاحيات', 'الدور', 'Role', 'نوع الصلاحية']);
-    const colSectors = findColumnHeader(usersTable.headers, ['القطاعات', 'القطاع', 'القطاعات المسموحة', 'الصلاحيات', 'Allowed Sectors', 'Sector']);
+    const colRole = findColumnHeader(usersTable.headers, ['الدور', 'Role', 'نوع الصلاحية', 'الدور الوظيفي', 'الصلاحية', 'الصلاحيات']);
+    const colSectors = findColumnHeader(usersTable.headers, ['القطاعات المسموحة', 'القطاعات', 'القطاع', 'Allowed Sectors', 'Sector', 'الصلاحيات']);
 
     if (!colUser && !colName) {
       markMissingCols('تعريف المستخدمين', ['اسم المستخدم']);
@@ -1249,10 +1249,29 @@ export function validateExcelBuffer(buffer: Buffer, filename: string): ImportVal
 
         const rawRole = colRole ? normalizeArabic(readCellAsText(row[colRole])) : '';
         const isAdmin =
-          rawRole.includes('مدير') ||
+          rawRole.includes('ادمن') ||
           rawRole.includes('admin') ||
-          rawRole.includes('الكل') ||
-          rawRole.includes('all');
+          rawRole.includes('مدير نظام') ||
+          rawRole.includes('مدير النظام') ||
+          rawRole.includes('مدير عام') ||
+          rawRole === 'الكل' ||
+          rawRole === 'all';
+
+        const isSectorManager =
+          !isAdmin &&
+          (rawRole.includes('مدير قطاع') ||
+            rawRole.includes('مدير ادارة') ||
+            rawRole.includes('مدير الادارة') ||
+            rawRole.includes('مدير ادار') ||
+            rawRole.includes('sector_manager') ||
+            rawRole.includes('manager') ||
+            rawRole.includes('مدير'));
+
+        const role: UserRole = isAdmin
+          ? 'admin'
+          : isSectorManager
+            ? 'sector_manager'
+            : 'standard_user';
 
         const rawSectors = colSectors ? readCellAsText(row[colSectors]) : '';
         const allowedSectors = isAdmin
@@ -1260,13 +1279,13 @@ export function validateExcelBuffer(buffer: Buffer, filename: string): ImportVal
           : rawSectors
               .split(/[,،;|/]/)
               .map((s) => canonicalizeSectorName(s))
-              .filter(Boolean);
+              .filter((s) => ORIGINAL_SECTORS.includes(s as (typeof ORIGINAL_SECTORS)[number]));
 
         importedUsers.push({
           username,
           fullName: rawName || username,
           email: colEmail ? readCellAsText(row[colEmail]) || null : null,
-          role: isAdmin ? 'admin' : 'sector_user',
+          role,
           allowedSectors,
         });
       }

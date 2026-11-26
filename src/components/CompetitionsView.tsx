@@ -34,6 +34,7 @@ interface CompetitionsViewProps {
   data: CompetitionAnalyticsResponse | null;
   loading: boolean;
   isAdmin: boolean;
+  canEditTargets: boolean;
   requestedSource: SalesSource;
   selectedSector: string;
   startDate: string;
@@ -89,6 +90,7 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
   data,
   loading,
   isAdmin,
+  canEditTargets,
   requestedSource,
   selectedSector,
   startDate,
@@ -840,7 +842,11 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
                 onClick={() => setShowItemsPanel((v) => !v)}
                 className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold border border-slate-300 rounded-lg bg-white text-slate-700 hover:bg-slate-50 cursor-pointer"
               >
-                <span>إدارة الأصناف والشدة المعيارية ({selectedItemDrafts.length})</span>
+                <span>
+                  {isAdmin
+                    ? `إدارة الأصناف والشدة المعيارية (${selectedItemDrafts.length})`
+                    : `عرض الأصناف والشدة المعيارية (${selectedItemDrafts.length})`}
+                </span>
                 {showItemsPanel ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
               </button>
             )}
@@ -1222,7 +1228,7 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
                   />
                 </div>
 
-                {isAdmin && (
+                {canEditTargets && (
                   <button
                     onClick={handleSaveTargets}
                     disabled={busyAction}
@@ -1318,7 +1324,7 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
                         </td>
 
                         <td className="py-2.5 px-4 whitespace-nowrap">
-                          {r.isAutoTarget || !isAdmin ? (
+                          {r.isAutoTarget || !canEditTargets ? (
                             <span
                               className="font-num tabular-nums font-semibold text-slate-900 inline-block"
                               dir="ltr"

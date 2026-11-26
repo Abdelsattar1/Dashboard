@@ -30,10 +30,12 @@ import {
   type CompetitionItemInput,
 } from './server/competitions-engine.ts';
 import {
+  AuthorizationError,
   createAuthMiddleware,
   hashPassword,
   mapDbUserToProfile,
   requireAdmin,
+  requireTargetEditor,
   signToken,
   verifyPassword,
   type AuthenticatedRequest,
@@ -41,6 +43,7 @@ import {
 } from './server/auth.ts';
 import { initDatabase } from './server/db.ts';
 import {
+  canonicalizeSectorName,
   commitValidatedImport,
   generateStandardTemplateWorkbook,
   ORIGINAL_SECTORS,
@@ -281,16 +284,20 @@ async function startServer() {
     res.json({ ...categoryAnalysis, items });
   });
 
-  app.put('/api/analytics/item-category-targets', requireAuth, requireAdmin, (req, res) => {
+  app.put('/api/analytics/item-category-targets', requireAuth, requireTargetEditor, (req: AuthenticatedRequest, res) => {
     const { targets } = req.body as { targets?: ItemCategoryTargetInput[] };
     if (!Array.isArray(targets)) {
       res.status(400).json({ error: 'صيغة أهداف الفئات غير صالحة' });
       return;
     }
     try {
-      saveItemCategoryTargets(db, targets);
+      saveItemCategoryTargets(db, targets, req.user!);
       res.json({ success: true });
     } catch (err) {
+      if (err instanceof AuthorizationError) {
+        res.status(403).json({ error: err.message });
+        return;
+      }
       res.status(400).json({ error: err instanceof Error ? err.message : 'تعذر حفظ أهداف الفئات' });
     }
   });
@@ -406,7 +413,7 @@ async function startServer() {
     }
   });
 
-  app.put('/api/competitions/:id/targets', requireAuth, requireAdmin, (req, res) => {
+  app.put('/api/competitions/:id/targets', requireAuth, requireTargetEditor, (req: AuthenticatedRequest, res) => {
     const compId = Number(req.params.id);
     if (!Number.isInteger(compId) || compId <= 0) {
       res.status(400).json({ error: 'معرف المسابقة غير صالح' });
@@ -420,9 +427,13 @@ async function startServer() {
       return;
     }
     try {
-      saveCompetitionTargets(db, compId, targets);
+      saveCompetitionTargets(db, compId, targets, req.user!);
       res.json({ success: true });
     } catch (err) {
+      if (err instanceof AuthorizationError) {
+        res.status(403).json({ error: err.message });
+        return;
+      }
       res.status(400).json({ error: err instanceof Error ? err.message : 'تعذر حفظ الأهداف الكمية' });
     }
   });
@@ -529,12 +540,31 @@ async function startServer() {
     res.json({ users: rows.map(mapDbUserToProfile) });
   });
 
+  const parseStrictUserRole = (raw: unknown): UserRole | null => {
+    if (raw === 'admin' || raw === 'sector_manager' || raw === 'standard_user') {
+      return raw;
+    }
+    return null;
+  };
+
+  const sanitizeSectorsInput = (raw: unknown): string[] => {
+    if (!Array.isArray(raw)) return [];
+    const list = raw.map((s) => String(s || '').trim()).filter(Boolean);
+    if (list.some((s) => s === 'الكل' || s.toLowerCase() === 'all')) {
+      return [...ORIGINAL_SECTORS];
+    }
+    const valid = list
+      .map((s) => canonicalizeSectorName(s))
+      .filter((s) => ORIGINAL_SECTORS.includes(s as (typeof ORIGINAL_SECTORS)[number]));
+    return Array.from(new Set(valid));
+  };
+
   app.post('/api/users', requireAuth, requireAdmin, (req, res) => {
     const { username, fullName, email, role, allowedSectors, password } = req.body as {
       username?: string;
       fullName?: string;
       email?: string;
-      role?: UserRole;
+      role?: string;
       allowedSectors?: string[];
       password?: string;
     };
@@ -542,8 +572,12 @@ async function startServer() {
     const cleanUsername = String(username || '').trim().toLowerCase();
     const cleanName = String(fullName || '').trim();
     const cleanPass = String(password || '');
-    const cleanRole: UserRole = role === 'admin' ? 'admin' : 'sector_user';
+    const cleanRole = parseStrictUserRole(role ?? 'standard_user');
 
+    if (!cleanRole) {
+      res.status(400).json({ error: 'الدور الوظيفي المحدد غير صالح' });
+      return;
+    }
     if (!cleanUsername || cleanUsername.length < 3) {
       res.status(400).json({ error: 'اسم المستخدم يجب أن يكون 3 أحرف على الأقل' });
       return;
@@ -563,12 +597,11 @@ async function startServer() {
       return;
     }
 
-    const sectors =
-      cleanRole === 'admin'
-        ? [...ORIGINAL_SECTORS]
-        : Array.isArray(allowedSectors)
-          ? allowedSectors.map((s) => String(s))
-          : [];
+    const sectors = cleanRole === 'admin' ? [...ORIGINAL_SECTORS] : sanitizeSectorsInput(allowedSectors);
+    if (cleanRole !== 'admin' && sectors.length === 0) {
+      res.status(400).json({ error: 'يرجى تحديد قطاع واحد على الأقل لهذا المستخدم' });
+      return;
+    }
 
     const now = new Date().toISOString();
     const resInsert = db
@@ -593,13 +626,28 @@ async function startServer() {
     const { fullName, email, role, allowedSectors, isActive, newPassword } = req.body as {
       fullName?: string;
       email?: string | null;
-      role?: UserRole;
+      role?: string;
       allowedSectors?: string[];
       isActive?: boolean;
       newPassword?: string;
     };
 
-    const nextRole: UserRole = role === 'admin' ? 'admin' : role === 'sector_user' ? 'sector_user' : existing.role;
+    let nextRole: UserRole =
+      existing.role === 'admin'
+        ? 'admin'
+        : existing.role === 'sector_manager'
+          ? 'sector_manager'
+          : 'standard_user';
+
+    if (role !== undefined) {
+      const parsed = parseStrictUserRole(role);
+      if (!parsed) {
+        res.status(400).json({ error: 'الدور الوظيفي المحدد غير صالح' });
+        return;
+      }
+      nextRole = parsed;
+    }
+
     const nextActive = typeof isActive === 'boolean' ? (isActive ? 1 : 0) : existing.is_active;
 
     if (targetId === req.user!.id && (nextRole !== 'admin' || nextActive === 0)) {
@@ -607,18 +655,37 @@ async function startServer() {
       return;
     }
 
-    const nextSectors =
-      nextRole === 'admin'
-        ? JSON.stringify([...ORIGINAL_SECTORS])
-        : Array.isArray(allowedSectors)
-          ? JSON.stringify(allowedSectors.map((s) => String(s)))
-          : existing.allowed_sectors;
+    let nextSectorsJson = existing.allowed_sectors;
+    if (nextRole === 'admin') {
+      nextSectorsJson = JSON.stringify([...ORIGINAL_SECTORS]);
+    } else if (allowedSectors !== undefined) {
+      const cleaned = sanitizeSectorsInput(allowedSectors);
+      if (cleaned.length === 0) {
+        res.status(400).json({ error: 'يرجى تحديد قطاع واحد على الأقل لهذا المستخدم' });
+        return;
+      }
+      nextSectorsJson = JSON.stringify(cleaned);
+    } else {
+      // Ensure existing sectors are non-empty when demoting from admin without explicit sector list
+      let existingList: string[] = [];
+      try {
+        const parsed = JSON.parse(existing.allowed_sectors);
+        if (Array.isArray(parsed)) existingList = sanitizeSectorsInput(parsed);
+      } catch {
+        existingList = [];
+      }
+      if (existingList.length === 0) {
+        res.status(400).json({ error: 'يرجى تحديد قطاع واحد على الأقل لهذا المستخدم' });
+        return;
+      }
+      nextSectorsJson = JSON.stringify(existingList);
+    }
 
-    const nextHash = newPassword && newPassword.length >= 8 ? hashPassword(newPassword) : existing.password_hash;
     if (newPassword && newPassword.length > 0 && newPassword.length < 8) {
       res.status(400).json({ error: 'كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل' });
       return;
     }
+    const nextHash = newPassword && newPassword.length >= 8 ? hashPassword(newPassword) : existing.password_hash;
 
     db.prepare(
       `UPDATE users
@@ -628,7 +695,7 @@ async function startServer() {
       fullName ? String(fullName).trim() : existing.full_name,
       email !== undefined ? (email ? String(email).trim() : null) : existing.email,
       nextRole,
-      nextSectors,
+      nextSectorsJson,
       nextActive,
       nextHash,
       targetId

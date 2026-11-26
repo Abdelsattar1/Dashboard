@@ -22,16 +22,28 @@ import type {
 } from '../types/bi';
 import { apiRequest, downloadProtectedFile } from '../utils/api';
 import { formatDateTime, formatEGP, formatNum } from '../utils/format';
+import { getRoleLabel, getRolePermissionsHint } from '../utils/roles';
 
 const ALL_SECTORS = ['التوريد المباشر', 'التوريد المركزي', 'التوب ريتيل', 'الجيش'] as const;
 
+export type ImportAdminSubTab = 'import' | 'history' | 'users' | 'export';
+
 interface ImportAdminViewProps {
   currentUser: UserProfile;
+  initialTab?: ImportAdminSubTab;
   onDataUpdated: () => void;
 }
 
-export const ImportAdminView: React.FC<ImportAdminViewProps> = ({ currentUser, onDataUpdated }) => {
-  const [activeTab, setActiveTab] = useState<'import' | 'history' | 'users' | 'export'>('import');
+export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
+  currentUser,
+  initialTab = 'import',
+  onDataUpdated,
+}) => {
+  const [activeTab, setActiveTab] = useState<ImportAdminSubTab>(initialTab);
+
+  useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab]);
 
   // Import state
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -48,16 +60,18 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({ currentUser, o
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [userError, setUserError] = useState<string | null>(null);
+  const [userSuccess, setUserSuccess] = useState<string | null>(null);
   const [newUsername, setNewUsername] = useState('');
   const [newFullName, setNewFullName] = useState('');
   const [newEmail, setNewEmail] = useState('');
-  const [newRole, setNewRole] = useState<UserRole>('sector_user');
+  const [newRole, setNewRole] = useState<UserRole>('standard_user');
   const [newSectors, setNewSectors] = useState<string[]>(['التوريد المباشر']);
   const [newPassword, setNewPassword] = useState('');
   const [editingUserId, setEditingUserId] = useState<number | null>(null);
+  const [editFullName, setEditFullName] = useState('');
   const [editPassword, setEditPassword] = useState('');
   const [editSectors, setEditSectors] = useState<string[]>([]);
-  const [editRole, setEditRole] = useState<UserRole>('sector_user');
+  const [editRole, setEditRole] = useState<UserRole>('standard_user');
 
   const loadHistory = async () => {
     setLoadingBatches(true);
@@ -171,6 +185,11 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({ currentUser, o
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     setUserError(null);
+    setUserSuccess(null);
+    if (newRole !== 'admin' && newSectors.length === 0) {
+      setUserError('يرجى تحديد قطاع واحد على الأقل لهذا المستخدم');
+      return;
+    }
     try {
       await apiRequest('/api/users', {
         method: 'POST',
@@ -183,11 +202,12 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({ currentUser, o
           password: newPassword,
         }),
       });
+      setUserSuccess(`تم إنشاء حساب «${newFullName.trim() || newUsername.trim()}» بنجاح.`);
       setNewUsername('');
       setNewFullName('');
       setNewEmail('');
       setNewPassword('');
-      setNewRole('sector_user');
+      setNewRole('standard_user');
       setNewSectors(['التوريد المباشر']);
       await loadUsers();
     } catch (err) {
@@ -197,10 +217,16 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({ currentUser, o
 
   const handleSaveUserEdit = async (userId: number) => {
     setUserError(null);
+    setUserSuccess(null);
+    if (editRole !== 'admin' && editSectors.length === 0) {
+      setUserError('يرجى تحديد قطاع واحد على الأقل للمستخدم');
+      return;
+    }
     try {
       await apiRequest(`/api/users/${userId}`, {
         method: 'PATCH',
         body: JSON.stringify({
+          fullName: editFullName.trim() || undefined,
           role: editRole,
           allowedSectors: editRole === 'admin' ? [...ALL_SECTORS] : editSectors,
           newPassword: editPassword || undefined,
@@ -208,6 +234,7 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({ currentUser, o
       });
       setEditingUserId(null);
       setEditPassword('');
+      setUserSuccess('تم تحديث صلاحيات وبيانات المستخدم بنجاح.');
       await loadUsers();
     } catch (err) {
       setUserError(err instanceof Error ? err.message : 'تعذر تحديث المستخدم');
@@ -216,6 +243,7 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({ currentUser, o
 
   const handleToggleUserActive = async (u: UserProfile) => {
     setUserError(null);
+    setUserSuccess(null);
     try {
       await apiRequest(`/api/users/${u.id}`, {
         method: 'PATCH',
@@ -229,8 +257,10 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({ currentUser, o
 
   const handleDeleteUser = async (u: UserProfile) => {
     setUserError(null);
+    setUserSuccess(null);
     try {
       await apiRequest(`/api/users/${u.id}`, { method: 'DELETE' });
+      setUserSuccess(`تم حذف الحساب «${u.fullName}».`);
       await loadUsers();
     } catch (err) {
       setUserError(err instanceof Error ? err.message : 'تعذر حذف المستخدم');
@@ -596,6 +626,11 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({ currentUser, o
                 {userError}
               </div>
             )}
+            {userSuccess && (
+              <div className="mb-3 p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-800">
+                {userSuccess}
+              </div>
+            )}
 
             <form onSubmit={handleCreateUser} className="space-y-3">
               <div>
@@ -633,18 +668,20 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({ currentUser, o
                 />
               </div>
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">الدور الوظيفي</label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">الدور الوظيفي والصلاحيات</label>
                 <select
                   value={newRole}
                   onChange={(e) => setNewRole(e.target.value as UserRole)}
                   className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
                 >
-                  <option value="sector_user">مستخدم بصلاحيات قطاعية</option>
-                  <option value="admin">مدير نظام (جميع الصلاحيات)</option>
+                  <option value="standard_user">مستخدم قياسي (عرض وتصدير فقط)</option>
+                  <option value="sector_manager">مدير قطاع / مدير إدارة (عرض + تصدير + تعديل الأهداف)</option>
+                  <option value="admin">أدمن / مدير نظام (صلاحية كاملة + رفع Excel)</option>
                 </select>
+                <p className="text-[11px] text-slate-500 mt-1">{getRolePermissionsHint(newRole)}</p>
               </div>
 
-              {newRole === 'sector_user' && (
+              {newRole !== 'admin' && (
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1.5">القطاعات المصرح بها</label>
                   <div className="space-y-1.5">
@@ -716,8 +753,8 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({ currentUser, o
                             <div className="font-semibold text-slate-900">{u.fullName}</div>
                             <div className="font-num text-slate-500">{u.username}</div>
                           </td>
-                          <td className="py-3 px-4 text-slate-700 font-medium">
-                            {u.role === 'admin' ? 'مدير نظام' : 'مستخدم قطاعي'}
+                          <td className="py-3 px-4 text-slate-700 font-medium whitespace-nowrap">
+                            {getRoleLabel(u.role)}
                           </td>
                           <td className="py-3 px-4 text-slate-600">
                             {u.role === 'admin'
@@ -743,12 +780,17 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({ currentUser, o
                                     setEditingUserId(null);
                                   } else {
                                     setEditingUserId(u.id);
+                                    setEditFullName(u.fullName);
                                     setEditRole(u.role);
-                                    setEditSectors(u.allowedSectors);
+                                    setEditSectors(
+                                      Array.isArray(u.allowedSectors) && u.allowedSectors.length > 0
+                                        ? u.allowedSectors
+                                        : ['التوريد المباشر']
+                                    );
                                     setEditPassword('');
                                   }
                                 }}
-                                className="inline-flex items-center gap-1 px-2.5 py-1 border border-slate-300 rounded text-slate-700 hover:bg-slate-50 cursor-pointer"
+                                className="inline-flex items-center gap-1 px-2.5 py-1 border border-slate-300 rounded text-slate-700 hover:bg-slate-50 cursor-pointer whitespace-nowrap"
                               >
                                 <KeyRound className="w-3 h-3" />
                                 <span>تعديل / كلمة مرور</span>
@@ -770,21 +812,31 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({ currentUser, o
                             <td colSpan={5} className="p-4">
                               <div className="flex flex-wrap items-end gap-4">
                                 <div>
-                                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">الدور</label>
+                                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">الاسم الكامل</label>
+                                  <input
+                                    type="text"
+                                    value={editFullName}
+                                    onChange={(e) => setEditFullName(e.target.value)}
+                                    className="px-3 py-1.5 text-xs border border-slate-300 rounded bg-white"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">الدور والصلاحية</label>
                                   <select
                                     value={editRole}
                                     onChange={(e) => setEditRole(e.target.value as UserRole)}
                                     disabled={u.id === currentUser.id}
                                     className="px-3 py-1.5 text-xs border border-slate-300 rounded bg-white"
                                   >
-                                    <option value="sector_user">مستخدم قطاعي</option>
-                                    <option value="admin">مدير نظام</option>
+                                    <option value="standard_user">مستخدم قياسي (عرض وتصدير)</option>
+                                    <option value="sector_manager">مدير قطاع / إدارة (تعديل الأهداف)</option>
+                                    <option value="admin">أدمن (صلاحية كاملة)</option>
                                   </select>
                                 </div>
-                                {editRole === 'sector_user' && (
+                                {editRole !== 'admin' && (
                                   <div className="flex flex-wrap items-center gap-3">
                                     {ALL_SECTORS.map((sec) => (
-                                      <label key={sec} className="flex items-center gap-1.5 text-xs text-slate-700">
+                                      <label key={sec} className="flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer">
                                         <input
                                           type="checkbox"
                                           checked={editSectors.includes(sec)}
