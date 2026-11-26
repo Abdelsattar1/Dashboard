@@ -1,0 +1,6 @@
+{
+  "name": "نظام متابعة أداء المبيعات FMCG",
+  "description": "منظومة تحليل ومتابعة أداء المبيعات والأهداف للسلع الاستهلاكية مع استيراد ملفات Excel وصلاحيات قطاعية",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
