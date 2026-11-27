@@ -32,7 +32,13 @@ import {
   updateCompetition,
 } from '../server/competitions-engine.ts';
 import { initDatabase } from '../server/db.ts';
-import { commitValidatedImport, excelSerialToIsoDate, rollbackToBatch, validateExcelBuffer } from '../server/excel-engine.ts';
+import {
+  commitValidatedImport,
+  excelSerialToIsoDate,
+  getActiveSalesPeriods,
+  rollbackToBatch,
+  validateExcelBuffer,
+} from '../server/excel-engine.ts';
 import { executeAutoFix, recordRuntimeError, rollbackAutoFix, runSmartAudit } from '../server/smart-auditor.ts';
 import type { UserProfile } from '../src/types/bi.ts';
 import { SUPABASE_SCHEMA_SQL } from '../src/utils/supabase-sql.ts';
@@ -263,11 +269,18 @@ function runTests() {
   console.log('Running Sales BI Engine Verification Tests...');
   assert.equal(excelSerialToIsoDate(46336), '2026-11-10', 'Excel serial date 46336 must convert to 2026-11-10');
 
-  const db = initDatabase(':memory:');
-  db.prepare(
-    `INSERT INTO users (username, full_name, email, role, allowed_sectors, password_hash, created_at)
-     VALUES ('admin', 'مدير النظام', 'admin@test.com', 'admin', '[]', 'salt:hash', '2026-11-23T00:00:00Z')`
-  ).run();
+  const createSeededTestDb = () => {
+    const freshDb = initDatabase(':memory:');
+    freshDb
+      .prepare(
+        `INSERT INTO users (username, full_name, email, role, allowed_sectors, password_hash, created_at)
+         VALUES ('admin', 'مدير النظام', 'admin@test.com', 'admin', '[]', 'salt:hash', '2026-11-23T00:00:00Z')`
+      )
+      .run();
+    return freshDb;
+  };
+
+  let db = createSeededTestDb();
 
   const adminUser: UserProfile = {
     id: 1,
@@ -445,6 +458,7 @@ function runTests() {
   assert.equal(restored.status, 'active');
 
   // 9. Verify Hierarchical Supervisor-Grouped Chains Breakdown, التصنيف A (تجاري/صناعي), Negative Share %, & VF05N Fallback Split
+  db = createSeededTestDb();
   const supWb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(
     supWb,
@@ -563,6 +577,7 @@ function runTests() {
   }
 
   // 10. Verify "تعريف الإدارات والقطاعات" (with Hamza), Leading-Zero Payer matching, Chain Name fallback, and "غير محدد" only for unmatched rows
+  db = createSeededTestDb();
   const hamzaWb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(hamzaWb, XLSX.utils.aoa_to_sheet([['القطاع'], ['التوب ريتيل']]), 'القطاعات');
   XLSX.utils.book_append_sheet(hamzaWb, XLSX.utils.aoa_to_sheet([['القطاع', 'الهدف'], ['التوب ريتيل', 1000000]]), 'اهداف القطاعات');
@@ -647,6 +662,7 @@ function runTests() {
   assert.equal(unmatchedChain.supervisorName, 'غير محدد', 'Unmatched chain must show غير محدد');
 
   // 11. Verify Multi-Code Chain Consolidation by Normalized Chain Name within Supervisor (e.g. ال اس جى across 64001238 & 64001380)
+  db = createSeededTestDb();
   const multiCodeWb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(multiCodeWb, XLSX.utils.aoa_to_sheet([['القطاع'], ['التوريد المباشر']]), 'القطاعات');
   XLSX.utils.book_append_sheet(multiCodeWb, XLSX.utils.aoa_to_sheet([['القطاع', 'الهدف'], ['التوريد المباشر', 2000000]]), 'اهداف القطاعات');
@@ -719,6 +735,7 @@ function runTests() {
   }
 
   // 12. Verify Branches Analytics with كود الادارة / اسم الادارة / اسم المشرف / إجمالى الهدف, repBreakdowns, target === 0 -> null, and >= 70.5% boundary
+  db = createSeededTestDb();
   const brWb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(brWb, XLSX.utils.aoa_to_sheet([['القطاع'], ['التوريد المباشر']]), 'القطاعات');
   XLSX.utils.book_append_sheet(brWb, XLSX.utils.aoa_to_sheet([['القطاع', 'الهدف'], ['التوريد المباشر', 500000]]), 'اهداف القطاعات');
@@ -809,6 +826,7 @@ function runTests() {
   assert.ok(edge704.achievementPct! < 70.5, '70.40% must NOT pass >= 70.5% efficiency threshold');
 
   // 13. Verify strict branch-row Supervisor truth (no override from chain or rep), leading-zero Sold-to Party matching, & sector join by branch_code
+  db = createSeededTestDb();
   const supIsoWb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(
     supIsoWb,
@@ -903,6 +921,7 @@ function runTests() {
   assert.equal(armyOnlyBranches[0].sales, 8958.08, 'Branch sales must join on branch_code even when Payer sector differs');
 
   // 14. Verify Sales Reps Target aggregation & Achievement % = Sales / (Target - Tax)
+  db = createSeededTestDb();
   const repsWb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(
     repsWb,
@@ -1042,6 +1061,7 @@ function runTests() {
   // =========================================================================
   // 15. Item Categories Analysis (`تحليل فئات الأصناف`) + Sector Classifications + Category Targets
   // =========================================================================
+  db = createSeededTestDb();
   const catWb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(
     catWb,
@@ -1313,6 +1333,7 @@ function runTests() {
   //     - رافت محمد: auto-computed per category from Central Supply (avoiding double counting!)
   //     - عبدالستار مصطفى: strictly manual in-app editable (NEVER auto-summed from Direct+Army+TopRetail!)
   // =========================================================================
+  db = createSeededTestDb();
   const dmWb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(
     dmWb,
@@ -1705,6 +1726,7 @@ function runTests() {
   // 18. Branch & Rep Deduplication, Consolidated Same-Name Multi-Code Branches,
   //     Supervisor Isolation, Leading Zeros, & Cross-Rep Diagnostics
   // =========================================================================
+  db = createSeededTestDb();
   const dedupWb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(
     dedupWb,
@@ -1830,6 +1852,7 @@ function runTests() {
   // 19. Unified Sector Sales & Tax Totals Across ALL Job Titles (`مندوب` / `مشرف` / `مدير قطاع`)
   //     Even when geographical chain supervisors in `departments_chains` sell ALL categories or omit a category-only supervisor!
   // =========================================================================
+  db = createSeededTestDb();
   const unifiedWb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(
     unifiedWb,
@@ -2203,6 +2226,7 @@ function runTests() {
   assert.equal(classifyClassA('أصناف تجارية'), 'commercial');
   assert.equal(classifyClassA(''), 'other');
 
+  db = createSeededTestDb();
   const classAWb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(
     classAWb,
@@ -2606,13 +2630,179 @@ function runTests() {
   assert.equal(verifyPassword(tempPw2, resetRow.password_hash), true);
   assert.equal(verifyPassword(permPw, resetRow.password_hash), false);
 
-  // Verify embedded Supabase SQL schema defines required tables & must_change_password flag
+  // Verify embedded Supabase SQL schema defines required tables, billing_date index (without sales_period), unique indexes & must_change_password flag
   for (const tbl of ['app_users', 'import_batches', 'sectors', 'branches', 'sales_records', 'item_category_targets', 'competitions', 'competition_targets']) {
     assert.ok(SUPABASE_SCHEMA_SQL.includes(`CREATE TABLE IF NOT EXISTS public.${tbl}`), `Supabase schema must define ${tbl}`);
   }
   assert.ok(SUPABASE_SCHEMA_SQL.includes('must_change_password BOOLEAN NOT NULL DEFAULT TRUE'));
+  assert.ok(!SUPABASE_SCHEMA_SQL.includes('sales_period'), 'Supabase schema must NOT reference sales_period');
+  for (const idx of [
+    'uq_sectors_name',
+    'uq_departments_chains_code',
+    'uq_branches_code',
+    'uq_sales_reps_code',
+    'uq_items_code',
+    'uq_category_targets_key',
+    'idx_sales_billing_date',
+  ]) {
+    assert.ok(SUPABASE_SCHEMA_SQL.includes(idx), `Supabase schema must define index ${idx}`);
+  }
 
-  console.log('All Sales BI Engine tests PASSED (23/23 assertion groups verified).');
+  // =========================================================================
+  // 24. Incremental Master Data Upsert (No Duplicates) & Monthly Sales
+  //     Partitioning (Replace Matching Month Only, Preserve Other Months)
+  // =========================================================================
+  const incDb = createSeededTestDb();
+
+  // Assert local SQLite sales_records table does NOT contain a sales_period column
+  const sqliteSalesCols = incDb.prepare(`PRAGMA table_info(sales_records)`).all() as Array<{ name: string }>;
+  assert.ok(!sqliteSalesCols.some((c) => c.name === 'sales_period'), 'Local sales_records must NOT contain sales_period');
+
+  const buildMonthlyWb = (opts: {
+    branches: Array<[string, string, string, number]>;
+    items: Array<[string, string, string]>;
+    vfRows: Array<[string, string, string | number, string, string, number, number]>;
+    zsRows: Array<[string | number, string, string, string, number, number, number]>;
+  }) => {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['كود القطاع', 'القطاع'], ['S1', 'التوريد المباشر']]), 'القطاعات');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['القطاع', 'الهدف'], ['التوريد المباشر', 1000000]]), 'اهداف القطاعات');
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet([
+        ['كود السلسلة', 'اسم السلسلة', 'الادارة', 'اسم المشرف', 'القطاع'],
+        ['001001', 'سلسلة المباشر', 'ادارة المباشر', 'مشرف مباشر', 'التوريد المباشر'],
+      ]),
+      'تعريف الادارات والقطاعات'
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet([['كود الفرع', 'اسم الفرع', 'القطاع', 'الهدف'], ...opts.branches]),
+      'تعريف الفروع و الاهداف'
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet([['كود المندوب', 'اسم المندوب', 'القطاع'], ['R1', 'مندوب أول', 'التوريد المباشر']]),
+      'تعريف مندوبى البيع'
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet([['كود الصنف', 'اسم الصنف', 'التصنيف A'], ...opts.items]),
+      'تعريف الاصناف'
+    );
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['اسم المستخدم', 'الصلاحيات'], ['u1', 'الكل']]), 'تعريف المستخدمين');
+
+    const vfHeader = ['Sold-to Party', 'Payer', 'Billing Date', 'Material', 'Sales Employee Code', 'New Total Tax', 'New Growth Value BD&T'];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([vfHeader, ...opts.vfRows]), 'VF05N (2)');
+
+    const zsHeader = ['Billing Dt.', 'Customer', 'Material', 'Sales Emp.', 'Qty', 'Total Tax', 'New Growth Value BD&T'];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([zsHeader, ...opts.zsRows]), 'Zsales_Price (2)');
+
+    return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  };
+
+  // Upload 1: October 2026 (`2026-10`), 2 branches (`000501`, `000502`), 2 items (`ITM-1`, `ITM-2`)
+  const octBuf = buildMonthlyWb({
+    branches: [
+      ['000501', 'فرع أكتوبر الأول', 'التوريد المباشر', 100000],
+      ['000502', 'فرع أكتوبر الثاني', 'التوريد المباشر', 50000],
+    ],
+    items: [
+      ['ITM-1', 'صنف قديم 1', 'تجارى'],
+      ['ITM-2', 'صنف قديم 2', 'صناعى'],
+    ],
+    vfRows: [
+      ['000501', '001001', '2026-10-12', 'ITM-1', 'R1', 140, 10000],
+      ['000502', '001001', '20.10.2026', 'ITM-2', 'R1', 70, 5000],
+    ],
+    zsRows: [
+      ['12.10.2026', '001001', 'ITM-1', 'R1', 10, 140, 10000],
+      ['2026-10-20', '001001', 'ITM-2', 'R1', 5, 70, 5000],
+    ],
+  });
+
+  const octReport = validateExcelBuffer(octBuf, 'Oct_2026.xlsx', getActiveSalesPeriods(incDb));
+  assert.equal(octReport.canCommit, true);
+  assert.equal(octReport.periodsDetected?.length, 1);
+  assert.equal(octReport.periodsDetected?.[0].period, '2026-10');
+  assert.equal(octReport.periodsDetected?.[0].action, 'add');
+  const octBatch = commitValidatedImport(incDb, octReport.validationToken, { id: 1, fullName: 'مدير النظام' });
+  assert.equal(octBatch.vf05nSalesTotal, 15000);
+  assert.deepEqual(getActiveSalesPeriods(incDb), ['2026-10']);
+
+  // Upload 2: November 2026 (`2026-11`, extracted from Billing Date in VF05N (2) & Billing Dt. serial/string in Zsales_Price (2)),
+  //           updates existing branch `000501` (name & target), adds new branch `000503` (omits `000502`),
+  //           updates item `ITM-1`, adds item `ITM-3` -> MUST NOT duplicate `000501` or `ITM-1` and MUST preserve `2026-10`!
+  const novBuf = buildMonthlyWb({
+    branches: [
+      ['000501', 'فرع محدث اسمياً', 'التوريد المباشر', 120000],
+      ['000503', 'فرع نوفمبر الجديد', 'التوريد المباشر', 80000],
+    ],
+    items: [
+      ['ITM-1', 'صنف محدث 1', 'تجارى'],
+      ['ITM-3', 'صنف جديد 3', 'صناعى'],
+    ],
+    vfRows: [['000503', '001001', '15/11/2026', 'ITM-3', 'R1', 280, 20000]],
+    zsRows: [[46341, '001001', 'ITM-3', 'R1', 20, 280, 20000]],
+  });
+
+  const novReport = validateExcelBuffer(novBuf, 'Nov_2026.xlsx', getActiveSalesPeriods(incDb));
+  assert.equal(novReport.canCommit, true);
+  assert.equal(novReport.periodsDetected?.[0].period, '2026-11');
+  assert.equal(novReport.periodsDetected?.[0].action, 'add', '2026-11 is a brand new month so action must be add');
+  const novBatch = commitValidatedImport(incDb, novReport.validationToken, { id: 1, fullName: 'مدير النظام' });
+
+  // Verify cumulative sales = Oct (15,000) + Nov (20,000) = 35,000 across BOTH VF05N and ZSALES!
+  assert.equal(novBatch.vf05nSalesTotal, 35000, 'Cumulative VF05N sales must combine Oct + Nov');
+  assert.equal(novBatch.zsalesSalesTotal, 35000, 'Cumulative ZSALES sales must combine Oct + Nov');
+  assert.deepEqual(getActiveSalesPeriods(incDb).sort(), ['2026-10', '2026-11']);
+
+  const afterNovDash = getDashboardSummary(incDb, adminUser, { source: 'VF05N' });
+  assert.equal(afterNovDash.kpis.privateMarketsSales, 35000);
+  const octOnlyDash = getDashboardSummary(incDb, adminUser, { source: 'VF05N', startDate: '2026-10-01', endDate: '2026-10-31' });
+  assert.equal(octOnlyDash.kpis.privateMarketsSales, 15000, 'October sales must remain untouched when November is added');
+  const novOnlyDash = getDashboardSummary(incDb, adminUser, { source: 'VF05N', startDate: '2026-11-01', endDate: '2026-11-30' });
+  assert.equal(novOnlyDash.kpis.privateMarketsSales, 20000, 'November synthesized billing date 2026-11-01 must filter cleanly');
+
+  // Verify Master Data Upsert: NO duplicate branches or items, updated fields reflected, unmentioned prior rows kept
+  const mergedBranchesDb = incDb
+    .prepare(`SELECT branch_code, branch_name, branch_target FROM branches WHERE batch_id = ? ORDER BY branch_code`)
+    .all(novBatch.id) as Array<{ branch_code: string; branch_name: string; branch_target: number }>;
+  assert.equal(mergedBranchesDb.length, 3, 'Master Upsert must contain 3 unique branches (000501 updated, 000502 kept, 000503 added)');
+  assert.equal(mergedBranchesDb.find((b) => b.branch_code === '000501')!.branch_name, 'فرع محدث اسمياً');
+  assert.equal(mergedBranchesDb.find((b) => b.branch_code === '000501')!.branch_target, 120000);
+  assert.equal(mergedBranchesDb.find((b) => b.branch_code === '000502')!.branch_name, 'فرع أكتوبر الثاني');
+  assert.equal(mergedBranchesDb.find((b) => b.branch_code === '000503')!.branch_name, 'فرع نوفمبر الجديد');
+
+  const mergedItemsDb = incDb
+    .prepare(`SELECT item_code, item_name FROM items WHERE batch_id = ? ORDER BY item_code`)
+    .all(novBatch.id) as Array<{ item_code: string; item_name: string }>;
+  assert.equal(mergedItemsDb.length, 3, 'Master Upsert must contain 3 unique items without duplicates');
+  assert.equal(mergedItemsDb.find((i) => i.item_code === 'ITM-1')!.item_name, 'صنف محدث 1');
+
+  // Upload 3: Corrected November 2026 (`2026-11`) -> MUST replace ONLY `2026-11` (20,000 -> 25,000) and preserve `2026-10` (15,000)!
+  const novFixBuf = buildMonthlyWb({
+    branches: [['000503', 'فرع نوفمبر الجديد', 'التوريد المباشر', 90000]],
+    items: [['ITM-3', 'صنف جديد 3', 'صناعى']],
+    vfRows: [['000503', '001001', '2026-11-18', 'ITM-3', 'R1', 350, 25000]],
+    zsRows: [['2026-11-18', '001001', 'ITM-3', 'R1', 25, 350, 25000]],
+  });
+
+  const novFixReport = validateExcelBuffer(novFixBuf, 'Nov_2026_Fixed.xlsx', getActiveSalesPeriods(incDb));
+  assert.equal(novFixReport.canCommit, true);
+  assert.equal(novFixReport.periodsDetected?.[0].period, '2026-11');
+  assert.equal(novFixReport.periodsDetected?.[0].action, 'replace', 'Existing month 2026-11 must be flagged for replacement');
+  const novFixBatch = commitValidatedImport(incDb, novFixReport.validationToken, { id: 1, fullName: 'مدير النظام' });
+
+  // Total must be Oct (15,000) + Corrected Nov (25,000) = 40,000 (NOT 15k + 20k + 25k = 60k, and NOT wiped to 25k!)
+  assert.equal(novFixBatch.vf05nSalesTotal, 40000, 'Re-uploading Nov must replace ONLY Nov and retain Oct');
+  assert.equal(novFixBatch.zsalesSalesTotal, 40000, 'Re-uploading Nov must replace ONLY Nov in ZSALES too');
+  const octPreserved = getDashboardSummary(incDb, adminUser, { source: 'VF05N', startDate: '2026-10-01', endDate: '2026-10-31' });
+  assert.equal(octPreserved.kpis.privateMarketsSales, 15000, 'October data must still be 15,000');
+  const novReplaced = getDashboardSummary(incDb, adminUser, { source: 'VF05N', startDate: '2026-11-01', endDate: '2026-11-30' });
+  assert.equal(novReplaced.kpis.privateMarketsSales, 25000, 'November data must reflect replaced 25,000');
+
+  console.log('All Sales BI Engine tests PASSED (24/24 assertion groups verified).');
 }
 
 runTests();

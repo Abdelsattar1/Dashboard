@@ -1,6 +1,7 @@
 -- =========================================================================
 -- Supabase PostgreSQL Schema for FMCG Sales Performance BI Platform
 -- Paste and Run this script once in Supabase Dashboard -> SQL Editor
+-- Supports Master Data Upsert (No Duplicates) + Monthly Sales Partitioning
 -- =========================================================================
 
 CREATE TABLE IF NOT EXISTS public.app_users (
@@ -213,11 +214,86 @@ CREATE TABLE IF NOT EXISTS public.audit_fix_backups (
   restored_at TIMESTAMPTZ
 );
 
--- Indexes for fast analytical filtering
+-- Clean superseded archived sales snapshots whose month is already present in the active batch
+DELETE FROM public.sales_records sr
+USING public.import_batches ib
+WHERE sr.batch_id = ib.id
+  AND ib.status = 'archived'
+  AND EXISTS (
+    SELECT 1
+    FROM public.sales_records act_sr
+    JOIN public.import_batches act_ib ON act_sr.batch_id = act_ib.id
+    WHERE act_ib.status = 'active'
+      AND substring(COALESCE(trim(act_sr.billing_date), '') FROM 1 FOR 7) = substring(COALESCE(trim(sr.billing_date), '') FROM 1 FOR 7)
+  );
+
+-- Deduplicate master tables keeping the newest record per natural key before creating unique indexes
+DELETE FROM public.sectors s
+USING (
+  SELECT id, ROW_NUMBER() OVER (PARTITION BY sector_name ORDER BY batch_id DESC, id DESC) AS rn
+  FROM public.sectors
+) d
+WHERE s.id = d.id AND d.rn > 1;
+
+DELETE FROM public.departments_chains dc
+USING (
+  SELECT id, ROW_NUMBER() OVER (PARTITION BY chain_code ORDER BY batch_id DESC, id DESC) AS rn
+  FROM public.departments_chains
+) d
+WHERE dc.id = d.id AND d.rn > 1;
+
+DELETE FROM public.branches b
+USING (
+  SELECT id, ROW_NUMBER() OVER (PARTITION BY branch_code ORDER BY batch_id DESC, id DESC) AS rn
+  FROM public.branches
+) d
+WHERE b.id = d.id AND d.rn > 1;
+
+DELETE FROM public.sales_reps sr
+USING (
+  SELECT id, ROW_NUMBER() OVER (PARTITION BY rep_code ORDER BY batch_id DESC, id DESC) AS rn
+  FROM public.sales_reps
+) d
+WHERE sr.id = d.id AND d.rn > 1;
+
+DELETE FROM public.items it
+USING (
+  SELECT id, ROW_NUMBER() OVER (PARTITION BY item_code ORDER BY batch_id DESC, id DESC) AS rn
+  FROM public.items
+) d
+WHERE it.id = d.id AND d.rn > 1;
+
+UPDATE public.category_targets
+SET
+  sector_name = COALESCE(trim(sector_name), ''),
+  job_title = COALESCE(trim(job_title), ''),
+  employee_name = COALESCE(trim(employee_name), ''),
+  category_name = COALESCE(trim(category_name), '');
+
+DELETE FROM public.category_targets ct
+USING (
+  SELECT id, ROW_NUMBER() OVER (
+    PARTITION BY sector_name, job_title, employee_name, category_name
+    ORDER BY batch_id DESC, id DESC
+  ) AS rn
+  FROM public.category_targets
+) d
+WHERE ct.id = d.id AND d.rn > 1;
+
+-- Unique constraints enabling idempotent Upsert on Master Data tables
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sectors_name ON public.sectors (sector_name);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_chains_code ON public.departments_chains (chain_code);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_branches_code ON public.branches (branch_code);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sales_reps_code ON public.sales_reps (rep_code);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_items_code ON public.items (item_code);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_category_targets_key ON public.category_targets (sector_name, job_title, employee_name, category_name);
+
+-- Indexes for fast analytical filtering & monthly replacement
 CREATE INDEX IF NOT EXISTS idx_sales_batch_source ON public.sales_records (batch_id, source_type);
 CREATE INDEX IF NOT EXISTS idx_sales_sector ON public.sales_records (batch_id, source_type, resolved_sector);
 CREATE INDEX IF NOT EXISTS idx_sales_branch ON public.sales_records (batch_id, source_type, resolved_branch_code);
 CREATE INDEX IF NOT EXISTS idx_sales_date ON public.sales_records (batch_id, source_type, billing_date);
+CREATE INDEX IF NOT EXISTS idx_sales_billing_date ON public.sales_records (billing_date);
 CREATE INDEX IF NOT EXISTS idx_branches_batch ON public.branches (batch_id, branch_code);
 CREATE INDEX IF NOT EXISTS idx_chains_batch ON public.departments_chains (batch_id, chain_code);
 CREATE INDEX IF NOT EXISTS idx_cat_targets_batch ON public.category_targets (batch_id, sector_name, job_title);

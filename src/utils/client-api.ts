@@ -25,6 +25,7 @@ import {
   canonicalizeSectorName,
   commitValidatedImport,
   generateStandardTemplateWorkbook,
+  getActiveSalesPeriods,
   ORIGINAL_SECTORS,
   rollbackToBatch,
   validateExcelBuffer,
@@ -567,8 +568,12 @@ export async function handleClientApiRequest<T>(
       throw new ClientHttpError(400, 'لم يتم إرفاق ملف Excel صالح');
     }
     try {
+      if (useSupabase) {
+        await ensureCloudSynced(db);
+      }
+      const existingPeriods = getActiveSalesPeriods(db);
       const arrBuf = await file.arrayBuffer();
-      return validateExcelBuffer(new Uint8Array(arrBuf), file.name) as T;
+      return validateExcelBuffer(new Uint8Array(arrBuf), file.name, existingPeriods) as T;
     } catch (err) {
       throw new ClientHttpError(400, err instanceof Error ? err.message : 'تعذر تحليل ملف Excel');
     }
@@ -581,6 +586,9 @@ export async function handleClientApiRequest<T>(
       throw new ClientHttpError(400, 'رمز التحقق مطلوب لاعتماد الاستيراد');
     }
     try {
+      if (useSupabase) {
+        await ensureCloudSynced(db);
+      }
       const batch = commitValidatedImport(db, validationToken, { id: u.id, fullName: u.fullName });
       if (useSupabase) {
         const remoteBatch = await supabasePushCommittedBatch(db, batch.id);

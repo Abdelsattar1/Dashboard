@@ -268,6 +268,44 @@ async function insertInChunks(table: string, rows: Record<string, unknown>[], ch
   }
 }
 
+async function upsertInChunks(
+  table: string,
+  rows: Record<string, unknown>[],
+  onConflict: string,
+  chunkSize = 400
+): Promise<void> {
+  if (rows.length === 0) return;
+  const sb = getSupabaseClient();
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const slice = rows.slice(i, i + chunkSize);
+    const { error } = await sb.from(table).upsert(slice, { onConflict });
+    if (error) throw formatSupabaseError(error, `تعذر تحديث بيانات ${table} في Supabase`);
+  }
+}
+
+function dedupeByKey<T>(rows: T[], keyFn: (row: T) => string): T[] {
+  const map = new Map<string, T>();
+  for (const row of rows) {
+    const k = keyFn(row);
+    if (!k) continue;
+    map.set(k, row);
+  }
+  return Array.from(map.values());
+}
+
+function extractMonthKey(billingDate: string | null | undefined): string {
+  const d = String(billingDate || '').trim();
+  const m = d.match(/^(\d{4})-(\d{2})(?:-\d{2})?/);
+  if (m) {
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    if (y >= 1990 && y <= 2099 && mo >= 1 && mo <= 12) {
+      return `${m[1]}-${m[2]}`;
+    }
+  }
+  return 'UNSPECIFIED';
+}
+
 export async function syncSupabaseToLocalDb(db: Database.Database, opts?: { forceBatch?: boolean }): Promise<void> {
   const sb = getSupabaseClient();
 
@@ -405,15 +443,40 @@ export async function syncSupabaseToLocalDb(db: Database.Database, opts?: { forc
   }> = [];
 
   if (shouldHydrateBatch && remoteBatch) {
-    [batchSectors, batchChains, batchBranches, batchReps, batchItems, batchCatTargets, batchSales] = await Promise.all([
-      fetchAllPaged<(typeof batchSectors)[number]>('sectors', remoteBatch.id),
-      fetchAllPaged<(typeof batchChains)[number]>('departments_chains', remoteBatch.id),
-      fetchAllPaged<(typeof batchBranches)[number]>('branches', remoteBatch.id),
-      fetchAllPaged<(typeof batchReps)[number]>('sales_reps', remoteBatch.id),
-      fetchAllPaged<(typeof batchItems)[number]>('items', remoteBatch.id),
-      fetchAllPaged<(typeof batchCatTargets)[number]>('category_targets', remoteBatch.id),
-      fetchAllPaged<(typeof batchSales)[number]>('sales_records', remoteBatch.id),
+    const [rawSectors, rawChains, rawBranches, rawReps, rawItems, rawCatTargets, rawSales] = await Promise.all([
+      fetchAllPaged<(typeof batchSectors)[number]>('sectors'),
+      fetchAllPaged<(typeof batchChains)[number]>('departments_chains'),
+      fetchAllPaged<(typeof batchBranches)[number]>('branches'),
+      fetchAllPaged<(typeof batchReps)[number]>('sales_reps'),
+      fetchAllPaged<(typeof batchItems)[number]>('items'),
+      fetchAllPaged<(typeof batchCatTargets)[number]>('category_targets'),
+      fetchAllPaged<(typeof batchSales)[number]>('sales_records'),
     ]);
+
+    const byBatchAsc = <T extends { batch_id: number; id: number }>(arr: T[]) =>
+      [...arr].sort((a, b) => a.batch_id - b.batch_id || a.id - b.id);
+
+    batchSectors = dedupeByKey(byBatchAsc(rawSectors), (s) => s.sector_name);
+    batchChains = dedupeByKey(byBatchAsc(rawChains), (c) => c.chain_code);
+    batchBranches = dedupeByKey(byBatchAsc(rawBranches), (b) => b.branch_code);
+    batchReps = dedupeByKey(byBatchAsc(rawReps), (r) => r.rep_code);
+    batchItems = dedupeByKey(byBatchAsc(rawItems), (it) => it.item_code);
+    batchCatTargets = dedupeByKey(
+      byBatchAsc(rawCatTargets),
+      (ct) => `${(ct.sector_name || '').trim()}\u0000${(ct.job_title || '').trim()}\u0000${(ct.employee_name || '').trim()}\u0000${(ct.category_name || '').trim()}`
+    );
+
+    // Accumulate distinct months across batches, preferring the latest batch_id per month (or active remoteBatch.id)
+    const monthOwnerBatch = new Map<string, number>();
+    for (const sr of rawSales) {
+      const m = extractMonthKey(sr.billing_date);
+      const prevOwner = monthOwnerBatch.get(m);
+      if (prevOwner === remoteBatch.id) continue;
+      if (sr.batch_id === remoteBatch.id || prevOwner === undefined || sr.batch_id > prevOwner) {
+        monthOwnerBatch.set(m, sr.batch_id);
+      }
+    }
+    batchSales = rawSales.filter((sr) => sr.batch_id === monthOwnerBatch.get(extractMonthKey(sr.billing_date)));
   }
 
   db.pragma('foreign_keys = OFF');
@@ -757,9 +820,9 @@ export async function supabasePushCommittedBatch(db: Database.Database, localBat
   const { error: archErr } = await sb.from('import_batches').update({ status: 'archived' }).eq('status', 'active');
   if (archErr) throw formatSupabaseError(archErr, 'تعذر أرشفة النسخ السابقة في Supabase');
 
-  let parsedValidation: unknown = {};
+  let parsedValidation: Record<string, unknown> = {};
   try {
-    parsedValidation = JSON.parse(batchRow.validation_report || '{}');
+    parsedValidation = JSON.parse(batchRow.validation_report || '{}') as Record<string, unknown>;
   } catch {
     parsedValidation = {};
   }
@@ -790,39 +853,90 @@ export async function supabasePushCommittedBatch(db: Database.Database, localBat
   if (batchErr) throw formatSupabaseError(batchErr, 'تعذر حفظ سجل الاستيراد في Supabase');
   const remoteBatchId = Number((insertedBatch as { id: number }).id);
 
-  await insertInChunks(
-    'sectors',
+  // 1. Upsert Master Reference Data without duplicating existing entities
+  const upsertSectors = dedupeByKey(
     sectors.map((s) => ({
       batch_id: remoteBatchId,
       sector_code: s.sector_code,
       sector_name: s.sector_name,
       monthly_target: s.monthly_target,
       is_original_sector: s.is_original_sector === 1,
-    }))
+    })),
+    (s) => String(s.sector_name)
   );
-  await insertInChunks(
-    'departments_chains',
-    chains.map((c) => ({ ...c, batch_id: remoteBatchId }))
+  await upsertInChunks('sectors', upsertSectors, 'sector_name');
+
+  const upsertChains = dedupeByKey(
+    chains.map((c): Record<string, unknown> => ({ ...c, batch_id: remoteBatchId })),
+    (c) => String(c.chain_code || '')
   );
-  await insertInChunks(
-    'branches',
-    branches.map((b) => ({ ...b, batch_id: remoteBatchId }))
+  await upsertInChunks('departments_chains', upsertChains, 'chain_code');
+
+  const upsertBranches = dedupeByKey(
+    branches.map((b): Record<string, unknown> => ({ ...b, batch_id: remoteBatchId })),
+    (b) => String(b.branch_code || '')
   );
-  await insertInChunks(
-    'sales_reps',
-    reps.map((r) => ({ ...r, batch_id: remoteBatchId }))
+  await upsertInChunks('branches', upsertBranches, 'branch_code');
+
+  const upsertReps = dedupeByKey(
+    reps.map((r): Record<string, unknown> => ({ ...r, batch_id: remoteBatchId })),
+    (r) => String(r.rep_code || '')
   );
-  await insertInChunks(
-    'items',
-    items.map((it) => ({ ...it, batch_id: remoteBatchId }))
+  await upsertInChunks('sales_reps', upsertReps, 'rep_code');
+
+  const upsertItems = dedupeByKey(
+    items.map((it): Record<string, unknown> => ({ ...it, batch_id: remoteBatchId })),
+    (it) => String(it.item_code || '')
   );
-  await insertInChunks(
-    'category_targets',
-    catTargets.map((ct) => ({ ...ct, batch_id: remoteBatchId }))
+  await upsertInChunks('items', upsertItems, 'item_code');
+
+  const upsertCatTargets = dedupeByKey(
+    catTargets.map((ct): Record<string, unknown> => ({
+      ...ct,
+      sector_name: String(ct.sector_name || '').trim(),
+      job_title: String(ct.job_title || '').trim(),
+      employee_name: String(ct.employee_name || '').trim(),
+      category_name: String(ct.category_name || '').trim(),
+      batch_id: remoteBatchId,
+    })),
+    (ct) => `${String(ct.sector_name)}\u0000${String(ct.job_title)}\u0000${String(ct.employee_name)}\u0000${String(ct.category_name)}`
   );
+  await upsertInChunks('category_targets', upsertCatTargets, 'sector_name,job_title,employee_name,category_name');
+
+  // 2. Partitioned Monthly Sales Sync using billing_date (YYYY-MM):
+  //    Delete ONLY overlapping months from Supabase, leaving all other months untouched,
+  //    then insert only the newly uploaded month records.
+  const incSummary = parsedValidation.incrementalSummary as
+    | { replacedPeriods?: unknown; addedPeriods?: unknown }
+    | undefined;
+  let incomingPeriods: string[] = [];
+  if (incSummary) {
+    const repP = Array.isArray(incSummary.replacedPeriods) ? incSummary.replacedPeriods : [];
+    const addP = Array.isArray(incSummary.addedPeriods) ? incSummary.addedPeriods : [];
+    incomingPeriods = Array.from(new Set([...repP, ...addP].map((p) => String(p || '').trim()).filter(Boolean)));
+  }
+  if (incomingPeriods.length === 0) {
+    incomingPeriods = Array.from(
+      new Set(sales.map((sr) => extractMonthKey(sr.billing_date as string | null | undefined)))
+    ).filter(Boolean);
+  }
+
+  const validMonthPrefixes = incomingPeriods.filter((p) => /^\d{4}-\d{2}$/.test(p));
+  for (const period of validMonthPrefixes) {
+    const { error: delErr } = await sb.from('sales_records').delete().like('billing_date', `${period}%`);
+    if (delErr) throw formatSupabaseError(delErr, `تعذر تحديث مبيعات شهر ${period} في Supabase`);
+  }
+  if (incomingPeriods.includes('UNSPECIFIED')) {
+    const { error: delErr } = await sb.from('sales_records').delete().or('billing_date.is.null,billing_date.eq.');
+    if (delErr) throw formatSupabaseError(delErr, 'تعذر تحديث السجلات غير المؤرخة في Supabase');
+  }
+
+  const incomingSet = new Set(incomingPeriods);
+  const salesToPush = sales.filter((sr) => incomingSet.has(extractMonthKey(sr.billing_date as string | null | undefined)));
+
   await insertInChunks(
     'sales_records',
-    sales.map((sr) => ({
+    salesToPush.map((sr) => ({
       ...sr,
       batch_id: remoteBatchId,
       is_return: Boolean(sr.is_return),

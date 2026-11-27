@@ -319,6 +319,15 @@ export interface SheetCheckSummary {
   missingColumns: string[];
 }
 
+export interface ImportPeriodSummary {
+  period: string;
+  vf05nCount: number;
+  vf05nSalesTotal: number;
+  zsalesCount: number;
+  zsalesSalesTotal: number;
+  action: 'replace' | 'add';
+}
+
 export interface ImportValidationReport {
   validationToken: string;
   filename: string;
@@ -328,6 +337,12 @@ export interface ImportValidationReport {
   warnings: ValidationIssue[];
   sheets: SheetCheckSummary[];
   comparison: SourceComparisonSummary;
+  periodsDetected?: ImportPeriodSummary[];
+  incrementalSummary?: {
+    replacedPeriods: string[];
+    addedPeriods: string[];
+    retainedPeriods: string[];
+  };
   linkStats: {
     vf05nTotalRows: number;
     vf05nSectorLinkedRows: number;

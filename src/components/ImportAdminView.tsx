@@ -170,6 +170,7 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
         ...res,
         errors: Array.isArray(res.errors) ? res.errors : [],
         warnings: Array.isArray(res.warnings) ? res.warnings : [],
+        periodsDetected: Array.isArray(res.periodsDetected) ? res.periodsDetected : [],
         sheets: res.sheets.map((s) => ({
           ...s,
           detectedColumns: Array.isArray(s.detectedColumns) ? s.detectedColumns : [],
@@ -193,13 +194,18 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
     setImportMessage(null);
 
     try {
-      await apiRequest('/api/import/commit', {
+      const committed = await apiRequest<{ success: boolean; batch?: ImportBatchHistoryItem }>('/api/import/commit', {
         method: 'POST',
         body: JSON.stringify({ validationToken: report.validationToken }),
       });
+      const periodLabels = (report.periodsDetected ?? [])
+        .map((p) => (p.period === 'UNSPECIFIED' ? 'فترة غير محددة' : p.period))
+        .join('، ');
       setImportMessage({
         type: 'success',
-        text: `تم اعتماد وحفظ بيانات "${report.filename}" بنجاح مع الاحتفاظ بالنسخ السابقة في سجل الإصدارات.`,
+        text: `تم اعتماد وحفظ "${report.filename}" بنجاح (تحديث البيانات التعريفية بدون تكرار${
+          periodLabels ? `، ومعالجة أشهر: ${periodLabels}` : ''
+        })${committed?.batch ? ` — إجمالي السجلات التراكمي: ${formatNum(committed.batch.vf05nCount)}` : ''}.`,
       });
       setReport(null);
       setSelectedFile(null);
@@ -427,8 +433,8 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
             <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
               <div>
                 <h3 className="text-base font-bold text-slate-900">استيراد بيانات المبيعات من ملف Excel (.xlsx)</h3>
-                <p className="text-xs text-slate-500 mt-1">
-                  يقرأ النظام الأوراق التسع عبر SheetJS ويفحص الأعمدة وعلاقات الربط وتطابق المصادر قبل استبدال البيانات الحالية.
+                <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                  يتم تحديث البيانات التعريفية (الفروع، الإدارات، القطاعات، المناديب، والأصناف) بنظام Upsert دون تكرار، مع استخراج الشهر والسنة لكل سجل مبيعات لاستبدال الشهر الموجود فقط أو إضافة الأشهر الجديدة وتراكمها مع الأشهر السابقة.
                 </p>
               </div>
               <button
@@ -585,6 +591,51 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
                   </div>
                 </div>
               </div>
+
+              {/* Monthly Periods Breakdown & Update Policy */}
+              {(report.periodsDetected?.length ?? 0) > 0 && (
+                <div className="p-5 border-b border-slate-200 bg-slate-50/60">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                    <h5 className="text-xs font-bold text-slate-800">
+                      الأشهر المكتشفة في الملف وآلية الحفظ التراكمي
+                    </h5>
+                    <span className="text-[11px] text-slate-500">
+                      تحديث البيانات التعريفية بالدمج (Upsert بدون تكرار) + معالجة كل شهر على حدة
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {(report.periodsDetected ?? []).map((p) => (
+                      <div
+                        key={p.period}
+                        className="p-3 bg-white border border-slate-200 rounded-lg text-xs flex flex-col gap-1.5"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-bold font-num text-slate-900">
+                            {p.period === 'UNSPECIFIED' ? 'فترة غير محددة' : p.period}
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded-md text-[11px] font-semibold ${
+                              p.action === 'replace'
+                                ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                                : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                            }`}
+                          >
+                            {p.action === 'replace' ? 'استبدال الشهر الموجود فقط' : 'إضافة شهر جديد (حفظ السابق)'}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-600 font-num flex items-center justify-between">
+                          <span>VF05N: {formatNum(p.vf05nCount)} سجل</span>
+                          <span>{formatEGP(p.vf05nSalesTotal)}</span>
+                        </div>
+                        <div className="text-[11px] text-slate-600 font-num flex items-center justify-between">
+                          <span>Zsales: {formatNum(p.zsalesCount)} سجل</span>
+                          <span>{formatEGP(p.zsalesSalesTotal)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* 9 Sheets Table */}
               <div className="overflow-x-auto">

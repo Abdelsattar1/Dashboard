@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 import * as XLSXModule from 'xlsx';
 import type {
   ImportBatchHistoryItem,
+  ImportPeriodSummary,
   ImportValidationReport,
   SheetCheckSummary,
   UserRole,
@@ -190,7 +191,11 @@ function readCellAsDate(cell: XLSXModule.CellObject | undefined): string {
   if (cell.t === 'd' && cell.v instanceof Date && !Number.isNaN(cell.v.getTime())) {
     return cell.v.toISOString().slice(0, 10);
   }
-  const str = String(cell.w ?? cell.v).trim();
+  const str = String(cell.w ?? cell.v)
+    .replace(/[\u00A0\u200B-\u200F\uFEFF]/g, ' ')
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)))
+    .trim();
   if (!str) return '';
 
   // Match DD.MM.YYYY or DD/MM/YYYY (or MM/DD/YYYY if second part > 12)
@@ -216,6 +221,187 @@ function readCellAsDate(cell: XLSXModule.CellObject | undefined): string {
   }
 
   return str;
+}
+
+const ARABIC_MONTH_MAP: Array<[string, number]> = [
+  ['يناير', 1],
+  ['فبراير', 2],
+  ['مارس', 3],
+  ['ابريل', 4],
+  ['مايو', 5],
+  ['يونيو', 6],
+  ['يونيه', 6],
+  ['يوليو', 7],
+  ['يوليه', 7],
+  ['اغسطس', 8],
+  ['سبتمبر', 9],
+  ['اكتوبر', 10],
+  ['نوفمبر', 11],
+  ['ديسمبر', 12],
+  ['january', 1],
+  ['jan', 1],
+  ['february', 2],
+  ['feb', 2],
+  ['march', 3],
+  ['mar', 3],
+  ['april', 4],
+  ['apr', 4],
+  ['may', 5],
+  ['june', 6],
+  ['jun', 6],
+  ['july', 7],
+  ['jul', 7],
+  ['august', 8],
+  ['aug', 8],
+  ['september', 9],
+  ['sept', 9],
+  ['sep', 9],
+  ['october', 10],
+  ['oct', 10],
+  ['november', 11],
+  ['nov', 11],
+  ['december', 12],
+  ['dec', 12],
+];
+
+function isValidYearMonth(year: number, month: number): boolean {
+  return Number.isInteger(year) && year >= 1990 && year <= 2099 && Number.isInteger(month) && month >= 1 && month <= 12;
+}
+
+export function parseSalesPeriodFromCell(cell: XLSXModule.CellObject | undefined): string {
+  if (!cell || cell.v === undefined || cell.v === null) return '';
+
+  if (cell.t === 'n' && typeof cell.v === 'number' && Number.isFinite(cell.v)) {
+    const intVal = Math.trunc(cell.v);
+    if (intVal === cell.v && intVal >= 199001 && intVal <= 209912) {
+      const y = Math.floor(intVal / 100);
+      const m = intVal % 100;
+      if (isValidYearMonth(y, m)) {
+        return `${y}-${String(m).padStart(2, '0')}`;
+      }
+    }
+    const iso = readCellAsDate(cell);
+    if (/^\d{4}-\d{2}/.test(iso)) {
+      return iso.slice(0, 7);
+    }
+  }
+
+  if (cell.t === 'd' && cell.v instanceof Date && !Number.isNaN(cell.v.getTime())) {
+    return cell.v.toISOString().slice(0, 7);
+  }
+
+  const rawText = String(cell.w ?? cell.v)
+    .replace(/[\u00A0\u200B-\u200F\uFEFF]/g, ' ')
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)))
+    .trim();
+  if (!rawText) return '';
+
+  // YYYY-MM or YYYY/MM or YYYY-MM-DD
+  const ym = rawText.match(/^(\d{4})[./-](\d{1,2})(?:[./-]\d{1,2})?/);
+  if (ym) {
+    const y = Number(ym[1]);
+    const m = Number(ym[2]);
+    if (isValidYearMonth(y, m)) {
+      return `${y}-${String(m).padStart(2, '0')}`;
+    }
+  }
+
+  // MM/YYYY or MM-YYYY
+  const my = rawText.match(/^(\d{1,2})[./-](\d{4})$/);
+  if (my) {
+    const m = Number(my[1]);
+    const y = Number(my[2]);
+    if (isValidYearMonth(y, m)) {
+      return `${y}-${String(m).padStart(2, '0')}`;
+    }
+  }
+
+  // DD/MM/YYYY or DD.MM.YYYY
+  const dmy = rawText.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/);
+  if (dmy) {
+    const p1 = Number(dmy[1]);
+    const p2 = Number(dmy[2]);
+    const yearRaw = dmy[3];
+    const y = Number(yearRaw.length === 2 ? `20${yearRaw}` : yearRaw);
+    const m = p2 > 12 && p1 <= 12 ? p1 : p2;
+    if (isValidYearMonth(y, m)) {
+      return `${y}-${String(m).padStart(2, '0')}`;
+    }
+  }
+
+  // YYYYMM compact text
+  const compact = rawText.match(/^(20\d{2}|19\d{2})(\d{2})$/);
+  if (compact) {
+    const y = Number(compact[1]);
+    const m = Number(compact[2]);
+    if (isValidYearMonth(y, m)) {
+      return `${y}-${String(m).padStart(2, '0')}`;
+    }
+  }
+
+  // Named Arabic/English month + year (e.g. "نوفمبر 2026", "Nov-2026", "2026 نوفمبر")
+  const norm = normalizeArabic(rawText);
+  const yearMatch = norm.match(/\b(19\d{2}|20\d{2})\b/);
+  if (yearMatch) {
+    const y = Number(yearMatch[1]);
+    for (const [label, m] of ARABIC_MONTH_MAP) {
+      if (norm.includes(label) && isValidYearMonth(y, m)) {
+        return `${y}-${String(m).padStart(2, '0')}`;
+      }
+    }
+  }
+
+  return '';
+}
+
+export function extractMonthKey(billingDate: string | null | undefined): string {
+  const trimmed = String(billingDate || '').trim();
+  const m = trimmed.match(/^(\d{4})-(\d{2})(?:-\d{2})?/);
+  if (m && isValidYearMonth(Number(m[1]), Number(m[2]))) {
+    return `${m[1]}-${m[2]}`;
+  }
+  return 'UNSPECIFIED';
+}
+
+export function extractBillingMonthAndDate(
+  billingDate: string,
+  rawDateCell?: XLSXModule.CellObject,
+  rawPeriodCell?: XLSXModule.CellObject
+): { monthKey: string; billingDate: string } {
+  let fromDate = '';
+  const trimmedDate = String(billingDate || '').trim();
+  const isoMatch = trimmedDate.match(/^(\d{4})-(\d{2})(?:-\d{2})?$/);
+  if (isoMatch && isValidYearMonth(Number(isoMatch[1]), Number(isoMatch[2]))) {
+    fromDate = `${isoMatch[1]}-${isoMatch[2]}`;
+  } else if (rawDateCell) {
+    fromDate = parseSalesPeriodFromCell(rawDateCell);
+  }
+
+  const fromPeriod = rawPeriodCell ? parseSalesPeriodFromCell(rawPeriodCell) : '';
+  const monthKey = fromDate || fromPeriod || 'UNSPECIFIED';
+
+  let normalizedDate = trimmedDate;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedDate) && monthKey !== 'UNSPECIFIED') {
+    normalizedDate = `${monthKey}-01`;
+  }
+
+  return { monthKey, billingDate: normalizedDate };
+}
+
+export function getActiveSalesPeriods(db: Database.Database): string[] {
+  const active = db
+    .prepare(`SELECT id FROM import_batches WHERE status = 'active' ORDER BY id DESC LIMIT 1`)
+    .get() as { id: number } | undefined;
+  if (!active) return [];
+  const rows = db
+    .prepare(`SELECT DISTINCT billing_date FROM sales_records WHERE batch_id = ?`)
+    .all(active.id) as Array<{ billing_date: string | null }>;
+  const periods = new Set<string>();
+  for (const r of rows) {
+    periods.add(extractMonthKey(r.billing_date));
+  }
+  return Array.from(periods).sort();
 }
 
 interface ParsedSheetTable {
@@ -333,6 +519,7 @@ interface ParsedSalesRow {
   sourceType: 'VF05N' | 'ZSALES';
   docNumber: string;
   billingDate: string;
+  monthKey: string;
   payerCode: string;
   payerName: string;
   soldToCode: string;
@@ -407,7 +594,11 @@ function pruneExpiredStages() {
   }
 }
 
-export function validateExcelBuffer(buffer: Uint8Array | ArrayBuffer, filename: string): ImportValidationReport {
+export function validateExcelBuffer(
+  buffer: Uint8Array | ArrayBuffer,
+  filename: string,
+  existingPeriods: string[] = []
+): ImportValidationReport {
   pruneExpiredStages();
 
   const errors: ValidationIssue[] = [];
@@ -442,6 +633,7 @@ export function validateExcelBuffer(buffer: Uint8Array | ArrayBuffer, filename: 
         taxDifference: 0,
         isMatched: false,
       },
+      periodsDetected: [],
       linkStats: {
         vf05nTotalRows: 0,
         vf05nSectorLinkedRows: 0,
@@ -464,8 +656,8 @@ export function validateExcelBuffer(buffer: Uint8Array | ArrayBuffer, filename: 
   // 1. Check presence of all 9 required sheets
   const sheetTables = new Map<string, ParsedSheetTable>();
   const sheetHints: Record<string, string[]> = {
-    'VF05N (2)': ['New Growth Value BD&T', 'New Total Tax', 'Payer', 'Sold-to Party', 'Billing Date', 'Material'],
-    'Zsales_Price (2)': ['New Growth Value BD&T', 'Total Tax', 'Customer', 'Sales Emp.', 'Material', 'Billing Dt.', 'Billing Date'],
+    'VF05N (2)': ['New Growth Value BD&T', 'New Total Tax', 'Payer', 'Sold-to Party', 'Billing Date', 'Material', 'الفترة', 'الشهر', 'Period', 'Month'],
+    'Zsales_Price (2)': ['New Growth Value BD&T', 'Total Tax', 'Customer', 'Sales Emp.', 'Material', 'Billing Dt.', 'Billing Date', 'الفترة', 'الشهر', 'Period', 'Month'],
     'القطاعات': ['القطاع', 'اسم القطاع', 'Sector'],
     'اهداف القطاعات': ['القطاع', 'الهدف', 'المستهدف', 'Target'],
     'تعريف المستخدمين': ['اسم المستخدم', 'المستخدم', 'الصلاحية', 'القطاع', 'القطاعات'],
@@ -1219,6 +1411,22 @@ export function validateExcelBuffer(buffer: Uint8Array | ArrayBuffer, filename: 
     }
   }
 
+  // Deduplicate parsed category targets by natural key so DB upserts remain unique
+  const categoryTargetDedupMap = new Map<string, (typeof categoryTargetsList)[number]>();
+  for (const ct of categoryTargetsList) {
+    const cleanCt = {
+      sectorName: ct.sectorName.trim(),
+      jobTitle: ct.jobTitle.trim(),
+      employeeCode: ct.employeeCode.trim(),
+      employeeName: ct.employeeName.trim(),
+      categoryName: ct.categoryName.trim(),
+      targetValue: ct.targetValue,
+    };
+    const key = `${cleanCt.sectorName}\u0000${cleanCt.jobTitle}\u0000${cleanCt.employeeName}\u0000${cleanCt.categoryName}`;
+    categoryTargetDedupMap.set(key, cleanCt);
+  }
+  const dedupedCategoryTargetsList = Array.from(categoryTargetDedupMap.values());
+
   // Parse Users (`تعريف المستخدمين`)
   const importedUsers: Array<{ username: string; fullName: string; email: string | null; role: UserRole; allowedSectors: string[] }> = [];
   const usersTable = sheetTables.get('تعريف المستخدمين');
@@ -1350,7 +1558,24 @@ export function validateExcelBuffer(buffer: Uint8Array | ArrayBuffer, filename: 
     const colSoldToName = isZsales
       ? null
       : findColumnHeader(table.headers, ['Name of Sold-to Party', 'Sold-to Party Name', 'Sold-To Name', 'اسم الفرع']);
-    const colDate = findColumnHeader(table.headers, ['Billing Date', 'Billing Dt.', 'Billing Dt', 'Document Date', 'Date', 'التاريخ', 'تاريخ الفاتورة']);
+    const colDate = isZsales
+      ? findColumnHeader(table.headers, ['Billing Dt.', 'Billing Dt', 'Billing Date', 'Document Date', 'Date', 'التاريخ', 'تاريخ الفاتورة'])
+      : findColumnHeader(table.headers, ['Billing Date', 'Billing Dt.', 'Billing Dt', 'Document Date', 'Date', 'التاريخ', 'تاريخ الفاتورة']);
+    const colPeriod = findColumnHeader(table.headers, [
+      'الفترة',
+      'الشهر',
+      'الشهر/السنة',
+      'الشهر والسنة',
+      'الشهر - السنة',
+      'تاريخ الفترة',
+      'Period',
+      'Month',
+      'Fiscal Period',
+      'Year-Month',
+      'Year Month',
+      'CalMonth',
+      'Billing Month',
+    ]);
     const colDoc = findColumnHeader(table.headers, ['Billing Document', 'Document', 'Invoice', 'رقم الفاتورة']);
     const colItem = findColumnHeader(table.headers, ['Material', 'Material Code', 'Item Code', 'كود الصنف']);
     const colItemName = findColumnHeader(table.headers, ['Material Description', 'Item Name', 'Description', 'اسم الصنف']);
@@ -1413,7 +1638,12 @@ export function validateExcelBuffer(buffer: Uint8Array | ArrayBuffer, filename: 
       const soldToCode = colSoldTo ? readCellAsCode(row[colSoldTo]) : '';
       const soldToName = colSoldToName ? readCellAsText(row[colSoldToName]) : '';
       const docNumber = colDoc ? readCellAsCode(row[colDoc]) : '';
-      const billingDate = colDate ? readCellAsDate(row[colDate]) : '';
+      const rawBillingDate = colDate ? readCellAsDate(row[colDate]) : '';
+      const { monthKey, billingDate } = extractBillingMonthAndDate(
+        rawBillingDate,
+        colDate ? row[colDate] : undefined,
+        colPeriod ? row[colPeriod] : undefined
+      );
       const itemCode = colItem ? readCellAsCode(row[colItem]) : '';
       const itemName = colItemName ? readCellAsText(row[colItemName]) : '';
       const rawRepCode = colRep ? readCellAsCode(row[colRep]) : '';
@@ -1439,6 +1669,7 @@ export function validateExcelBuffer(buffer: Uint8Array | ArrayBuffer, filename: 
         sourceType,
         docNumber,
         billingDate,
+        monthKey,
         payerCode: payerCode || chainMatch?.chainCode || '',
         payerName,
         soldToCode,
@@ -1575,6 +1806,33 @@ export function validateExcelBuffer(buffer: Uint8Array | ArrayBuffer, filename: 
     });
   }
 
+  const existingPeriodSet = new Set(existingPeriods.map((p) => String(p || '').trim()).filter(Boolean));
+  const periodMap = new Map<string, ImportPeriodSummary>();
+  for (const r of [...vf05nRows, ...zsalesRows]) {
+    const key = r.monthKey || extractMonthKey(r.billingDate);
+    const cur = periodMap.get(key) ?? {
+      period: key,
+      vf05nCount: 0,
+      vf05nSalesTotal: 0,
+      zsalesCount: 0,
+      zsalesSalesTotal: 0,
+      action: existingPeriodSet.has(key) ? ('replace' as const) : ('add' as const),
+    };
+    if (r.sourceType === 'VF05N') {
+      cur.vf05nCount += 1;
+      cur.vf05nSalesTotal = Number((cur.vf05nSalesTotal + r.salesValue).toFixed(2));
+    } else {
+      cur.zsalesCount += 1;
+      cur.zsalesSalesTotal = Number((cur.zsalesSalesTotal + r.salesValue).toFixed(2));
+    }
+    periodMap.set(key, cur);
+  }
+  const periodsDetected = Array.from(periodMap.values()).sort((a, b) => {
+    if (a.period === 'UNSPECIFIED') return 1;
+    if (b.period === 'UNSPECIFIED') return -1;
+    return a.period.localeCompare(b.period);
+  });
+
   const totalSectorTargets = sectorsList.reduce((acc, s) => acc + s.monthlyTarget, 0);
   const directBranchesTargetTotal = branchesList.reduce((acc, b) => acc + b.branchTarget, 0);
 
@@ -1596,6 +1854,7 @@ export function validateExcelBuffer(buffer: Uint8Array | ArrayBuffer, filename: 
       taxDifference: taxDiff,
       isMatched,
     },
+    periodsDetected,
     linkStats: {
       vf05nTotalRows: vf05nRows.length,
       vf05nSectorLinkedRows: vf05nSectorLinked,
@@ -1630,7 +1889,7 @@ export function validateExcelBuffer(buffer: Uint8Array | ArrayBuffer, filename: 
       branches: branchesList,
       reps: repsList,
       items: itemsList,
-      categoryTargets: categoryTargetsList,
+      categoryTargets: dedupedCategoryTargetsList,
       hasCategoryTargetsSheet: categoryTargetSheets.length > 0,
       salesRecords: [...vf05nRows, ...zsalesRows],
       importedUsers,
@@ -1655,6 +1914,374 @@ export function commitValidatedImport(
   const { report } = staged;
 
   const tx = db.transaction(() => {
+    const prevBatch = db
+      .prepare(`SELECT id, has_category_targets_sheet FROM import_batches WHERE status = 'active' ORDER BY id DESC LIMIT 1`)
+      .get() as { id: number; has_category_targets_sheet: number } | undefined;
+
+    // 1. Merge / Upsert Master Reference Data by natural unique keys (never duplicate, preserve unmentioned entries)
+    const mergedSectorsMap = new Map<string, StagedImportPayload['sectors'][number]>();
+    const mergedChainsMap = new Map<string, StagedImportPayload['chains'][number]>();
+    const mergedBranchesMap = new Map<string, StagedImportPayload['branches'][number]>();
+    const mergedRepsMap = new Map<string, StagedImportPayload['reps'][number]>();
+    const mergedItemsMap = new Map<string, StagedImportPayload['items'][number]>();
+    const mergedCatTargetsMap = new Map<string, StagedImportPayload['categoryTargets'][number]>();
+
+    if (prevBatch) {
+      const prevSectors = db
+        .prepare(`SELECT sector_code, sector_name, monthly_target, is_original_sector FROM sectors WHERE batch_id = ?`)
+        .all(prevBatch.id) as Array<{
+        sector_code: string;
+        sector_name: string;
+        monthly_target: number;
+        is_original_sector: number;
+      }>;
+      for (const s of prevSectors) {
+        const key = canonicalizeSectorName(s.sector_name);
+        if (!key) continue;
+        mergedSectorsMap.set(key, {
+          sectorCode: s.sector_code,
+          sectorName: key,
+          monthlyTarget: s.monthly_target,
+          isOriginal: s.is_original_sector,
+        });
+      }
+
+      const prevChains = db
+        .prepare(`SELECT chain_code, chain_name, department_name, sector_name, supervisor_name FROM departments_chains WHERE batch_id = ?`)
+        .all(prevBatch.id) as Array<{
+        chain_code: string;
+        chain_name: string;
+        department_name: string;
+        sector_name: string;
+        supervisor_name: string;
+      }>;
+      for (const c of prevChains) {
+        const key = normalizeCode(c.chain_code);
+        if (!key) continue;
+        mergedChainsMap.set(key, {
+          chainCode: key,
+          chainName: c.chain_name,
+          departmentName: c.department_name,
+          sectorName: canonicalizeSectorName(c.sector_name),
+          supervisorName: c.supervisor_name || '',
+        });
+      }
+
+      const prevBranches = db
+        .prepare(
+          `SELECT branch_code, branch_name, sector_name, branch_target, chain_code, chain_name, rep_code, rep_name, supervisor_name
+           FROM branches WHERE batch_id = ?`
+        )
+        .all(prevBatch.id) as Array<{
+        branch_code: string;
+        branch_name: string;
+        sector_name: string;
+        branch_target: number;
+        chain_code: string | null;
+        chain_name: string;
+        rep_code: string | null;
+        rep_name: string;
+        supervisor_name: string;
+      }>;
+      for (const b of prevBranches) {
+        const key = normalizeCode(b.branch_code);
+        if (!key) continue;
+        mergedBranchesMap.set(key, {
+          branchCode: key,
+          branchName: b.branch_name,
+          sectorName: canonicalizeSectorName(b.sector_name),
+          branchTarget: b.branch_target,
+          chainCode: normalizeCode(b.chain_code || ''),
+          chainName: b.chain_name || '',
+          repCode: normalizeCode(b.rep_code || ''),
+          repName: b.rep_name || '',
+          supervisorName: b.supervisor_name || '',
+        });
+      }
+
+      const prevReps = db
+        .prepare(`SELECT rep_code, rep_name, sector_name, supervisor_name, monthly_target FROM sales_reps WHERE batch_id = ?`)
+        .all(prevBatch.id) as Array<{
+        rep_code: string;
+        rep_name: string;
+        sector_name: string | null;
+        supervisor_name: string | null;
+        monthly_target: number;
+      }>;
+      for (const r of prevReps) {
+        const key = normalizeCode(r.rep_code);
+        if (!key) continue;
+        mergedRepsMap.set(key, {
+          repCode: key,
+          repName: r.rep_name,
+          sectorName: r.sector_name ? canonicalizeSectorName(r.sector_name) : '',
+          supervisorName: r.supervisor_name || '',
+          monthlyTarget: r.monthly_target,
+        });
+      }
+
+      const prevItems = db
+        .prepare(
+          `SELECT item_code, item_name, category_name, brand_name, unit_name, chains_category, army_category, top_retail_category
+           FROM items WHERE batch_id = ?`
+        )
+        .all(prevBatch.id) as Array<{
+        item_code: string;
+        item_name: string;
+        category_name: string | null;
+        brand_name: string | null;
+        unit_name: string | null;
+        chains_category: string;
+        army_category: string;
+        top_retail_category: string;
+      }>;
+      for (const it of prevItems) {
+        const key = normalizeCode(it.item_code);
+        if (!key) continue;
+        mergedItemsMap.set(key, {
+          itemCode: key,
+          itemName: it.item_name,
+          categoryName: it.category_name || '',
+          brandName: it.brand_name || '',
+          unitName: it.unit_name || '',
+          chainsCategory: it.chains_category || '',
+          armyCategory: it.army_category || '',
+          topRetailCategory: it.top_retail_category || '',
+        });
+      }
+
+      const prevCatTargets = db
+        .prepare(`SELECT sector_name, job_title, employee_code, employee_name, category_name, target_value FROM category_targets WHERE batch_id = ?`)
+        .all(prevBatch.id) as Array<{
+        sector_name: string;
+        job_title: string;
+        employee_code: string;
+        employee_name: string;
+        category_name: string;
+        target_value: number;
+      }>;
+      for (const ct of prevCatTargets) {
+        const cleanCt = {
+          sectorName: (ct.sector_name || '').trim(),
+          jobTitle: (ct.job_title || '').trim(),
+          employeeCode: (ct.employee_code || '').trim(),
+          employeeName: (ct.employee_name || '').trim(),
+          categoryName: (ct.category_name || '').trim(),
+          targetValue: ct.target_value,
+        };
+        const key = `${cleanCt.sectorName}\u0000${cleanCt.jobTitle}\u0000${cleanCt.employeeName}\u0000${cleanCt.categoryName}`;
+        mergedCatTargetsMap.set(key, cleanCt);
+      }
+    }
+
+    // Apply Upserts from newly staged Excel payload (updates matching natural keys, inserts new ones once)
+    for (const s of staged.sectors) {
+      const key = canonicalizeSectorName(s.sectorName);
+      if (!key) continue;
+      mergedSectorsMap.set(key, { ...s, sectorName: key });
+    }
+    for (const c of staged.chains) {
+      const key = normalizeCode(c.chainCode);
+      if (!key) continue;
+      mergedChainsMap.set(key, { ...c, chainCode: key });
+    }
+    for (const b of staged.branches) {
+      const key = normalizeCode(b.branchCode);
+      if (!key) continue;
+      mergedBranchesMap.set(key, { ...b, branchCode: key });
+    }
+    for (const r of staged.reps) {
+      const key = normalizeCode(r.repCode);
+      if (!key) continue;
+      mergedRepsMap.set(key, { ...r, repCode: key });
+    }
+    for (const it of staged.items) {
+      const key = normalizeCode(it.itemCode);
+      if (!key) continue;
+      mergedItemsMap.set(key, { ...it, itemCode: key });
+    }
+    for (const ct of staged.categoryTargets) {
+      const cleanCt = {
+        sectorName: ct.sectorName.trim(),
+        jobTitle: ct.jobTitle.trim(),
+        employeeCode: ct.employeeCode.trim(),
+        employeeName: ct.employeeName.trim(),
+        categoryName: ct.categoryName.trim(),
+        targetValue: ct.targetValue,
+      };
+      const key = `${cleanCt.sectorName}\u0000${cleanCt.jobTitle}\u0000${cleanCt.employeeName}\u0000${cleanCt.categoryName}`;
+      mergedCatTargetsMap.set(key, cleanCt);
+    }
+
+    const mergedSectors = Array.from(mergedSectorsMap.values());
+    const mergedChains = Array.from(mergedChainsMap.values());
+    const mergedBranches = Array.from(mergedBranchesMap.values());
+    const mergedReps = Array.from(mergedRepsMap.values());
+    const mergedItems = Array.from(mergedItemsMap.values());
+    const mergedCatTargets = Array.from(mergedCatTargetsMap.values());
+
+    // Helper lookup maps on merged catalog for re-linking carried-over historical sales rows
+    const chainTrimmedLookup = new Map<string, StagedImportPayload['chains'][number]>();
+    const chainByNameLookup = new Map<string, StagedImportPayload['chains'][number]>();
+    for (const c of mergedChains) {
+      const trimmed = stripLeadingZeros(c.chainCode);
+      if (trimmed && !chainTrimmedLookup.has(trimmed)) chainTrimmedLookup.set(trimmed, c);
+      const normName = normalizeArabic(c.chainName);
+      if (normName && !chainByNameLookup.has(normName)) chainByNameLookup.set(normName, c);
+    }
+    const branchTrimmedLookup = new Map<string, StagedImportPayload['branches'][number]>();
+    for (const b of mergedBranches) {
+      const trimmed = stripLeadingZeros(b.branchCode);
+      if (trimmed && !branchTrimmedLookup.has(trimmed)) branchTrimmedLookup.set(trimmed, b);
+    }
+
+    // 2. Partition Sales Records by extracted Year-Month (from billing_date):
+    //    Replace ONLY overlapping periods present in the uploaded file; preserve all other periods!
+    const incomingPeriods = Array.from(new Set(staged.salesRecords.map((r) => r.monthKey || extractMonthKey(r.billingDate))));
+    const incomingPeriodSet = new Set(incomingPeriods);
+    const prevPeriodSet = new Set<string>();
+    const retainedSales: ParsedSalesRow[] = [];
+
+    if (prevBatch) {
+      const prevSalesRows = db
+        .prepare(
+          `SELECT source_type, doc_number, billing_date, payer_code, payer_name,
+                  sold_to_code, sold_to_name, item_code, item_name, rep_code, quantity, sales_value, tax_value,
+                  resolved_sector, resolved_department, resolved_chain_name,
+                  resolved_branch_code, resolved_branch_name, resolved_rep_code, resolved_rep_name, resolved_item_name,
+                  is_return
+           FROM sales_records WHERE batch_id = ?`
+        )
+        .all(prevBatch.id) as Array<{
+        source_type: 'VF05N' | 'ZSALES';
+        doc_number: string | null;
+        billing_date: string | null;
+        payer_code: string | null;
+        payer_name: string | null;
+        sold_to_code: string | null;
+        sold_to_name: string | null;
+        item_code: string | null;
+        item_name: string | null;
+        rep_code: string | null;
+        quantity: number;
+        sales_value: number;
+        tax_value: number;
+        resolved_sector: string | null;
+        resolved_department: string | null;
+        resolved_chain_name: string | null;
+        resolved_branch_code: string | null;
+        resolved_branch_name: string | null;
+        resolved_rep_code: string | null;
+        resolved_rep_name: string | null;
+        resolved_item_name: string | null;
+        is_return: number;
+      }>;
+
+      for (const r of prevSalesRows) {
+        const bDate = (r.billing_date || '').trim();
+        const monthKey = extractMonthKey(bDate);
+        prevPeriodSet.add(monthKey);
+        if (incomingPeriodSet.has(monthKey)) {
+          // Replaced by the newly uploaded data for this period
+          continue;
+        }
+
+        const pCode = normalizeCode(r.payer_code || '');
+        const pName = r.payer_name || '';
+        const sCode = normalizeCode(r.sold_to_code || '');
+        const rCode = normalizeCode(r.rep_code || '');
+        const iCode = normalizeCode(r.item_code || '');
+
+        const chainMatch =
+          (pCode ? mergedChainsMap.get(pCode) : undefined) ??
+          (pCode ? chainTrimmedLookup.get(stripLeadingZeros(pCode)) : undefined) ??
+          (pName ? chainByNameLookup.get(normalizeArabic(pName)) : undefined);
+        const branchMatch =
+          (sCode ? mergedBranchesMap.get(sCode) : undefined) ??
+          (sCode ? branchTrimmedLookup.get(stripLeadingZeros(sCode)) : undefined);
+        const effectiveRepCode = rCode || branchMatch?.repCode || '';
+        const repMatch = effectiveRepCode ? mergedRepsMap.get(effectiveRepCode) : undefined;
+        const itemMatch = iCode ? mergedItemsMap.get(iCode) : undefined;
+
+        retainedSales.push({
+          sourceType: r.source_type,
+          docNumber: r.doc_number || '',
+          billingDate: bDate,
+          monthKey,
+          payerCode: pCode || chainMatch?.chainCode || '',
+          payerName: pName,
+          soldToCode: sCode,
+          soldToName: r.sold_to_name || '',
+          itemCode: iCode,
+          itemName: r.item_name || itemMatch?.itemName || '',
+          repCode: effectiveRepCode,
+          quantity: r.quantity,
+          salesValue: r.sales_value,
+          taxValue: r.tax_value,
+          resolvedSector: chainMatch ? chainMatch.sectorName : r.resolved_sector,
+          resolvedDepartment: chainMatch ? chainMatch.departmentName : r.resolved_department,
+          resolvedChainName: chainMatch ? chainMatch.chainName : r.resolved_chain_name,
+          resolvedBranchCode: branchMatch ? branchMatch.branchCode : r.resolved_branch_code,
+          resolvedBranchName: branchMatch ? branchMatch.branchName : r.resolved_branch_name,
+          resolvedRepCode: repMatch ? repMatch.repCode : effectiveRepCode || r.resolved_rep_code,
+          resolvedRepName: repMatch ? repMatch.repName : r.resolved_rep_name,
+          resolvedItemName: itemMatch ? itemMatch.itemName : r.item_name || r.resolved_item_name,
+          isReturn: r.is_return,
+        });
+      }
+    }
+
+    const replacedPeriods = incomingPeriods.filter((p) => prevPeriodSet.has(p)).sort();
+    const addedPeriods = incomingPeriods.filter((p) => !prevPeriodSet.has(p)).sort();
+    const retainedPeriods = Array.from(prevPeriodSet)
+      .filter((p) => !incomingPeriodSet.has(p))
+      .sort();
+
+    const allSalesRecords = [...retainedSales, ...staged.salesRecords];
+
+    let vf05nCount = 0;
+    let vf05nSalesTotal = 0;
+    let vf05nTaxTotal = 0;
+    let zsalesCount = 0;
+    let zsalesSalesTotal = 0;
+    let zsalesTaxTotal = 0;
+    let unlinkedBranchCount = 0;
+    let unlinkedSectorCount = 0;
+
+    for (const r of allSalesRecords) {
+      if (r.sourceType === 'VF05N') {
+        vf05nCount++;
+        vf05nSalesTotal += r.salesValue;
+        vf05nTaxTotal += r.taxValue;
+        if (!r.resolvedBranchCode) unlinkedBranchCount++;
+        if (!r.resolvedSector) unlinkedSectorCount++;
+      } else {
+        zsalesCount++;
+        zsalesSalesTotal += r.salesValue;
+        zsalesTaxTotal += r.taxValue;
+      }
+    }
+
+    vf05nSalesTotal = Number(vf05nSalesTotal.toFixed(2));
+    vf05nTaxTotal = Number(vf05nTaxTotal.toFixed(2));
+    zsalesSalesTotal = Number(zsalesSalesTotal.toFixed(2));
+    zsalesTaxTotal = Number(zsalesTaxTotal.toFixed(2));
+
+    const finalReport: ImportValidationReport = {
+      ...report,
+      periodsDetected: (report.periodsDetected ?? []).map((p) => ({
+        ...p,
+        action: prevPeriodSet.has(p.period) ? 'replace' : 'add',
+      })),
+      incrementalSummary: {
+        replacedPeriods,
+        addedPeriods,
+        retainedPeriods,
+      },
+    };
+
+    const hasCatTargetsFlag = (prevBatch?.has_category_targets_sheet === 1) || staged.hasCategoryTargetsSheet ? 1 : 0;
+
     // Archive existing active batches without deleting them!
     db.prepare(`UPDATE import_batches SET status = 'archived' WHERE status = 'active'`).run();
 
@@ -1672,16 +2299,16 @@ export function commitValidatedImport(
         staged.filename,
         user.id,
         user.fullName,
-        report.comparison.vf05n.count,
-        report.comparison.vf05n.salesTotal,
-        report.comparison.vf05n.taxTotal,
-        report.comparison.zsales.count,
-        report.comparison.zsales.salesTotal,
-        report.comparison.zsales.taxTotal,
-        report.linkStats.vf05nBranchUnlinkedRows,
-        report.linkStats.vf05nSectorUnlinkedRows,
-        staged.hasCategoryTargetsSheet ? 1 : 0,
-        JSON.stringify(report),
+        vf05nCount,
+        vf05nSalesTotal,
+        vf05nTaxTotal,
+        zsalesCount,
+        zsalesSalesTotal,
+        zsalesTaxTotal,
+        unlinkedBranchCount,
+        unlinkedSectorCount,
+        hasCatTargetsFlag,
+        JSON.stringify(finalReport),
         now
       );
 
@@ -1690,21 +2317,21 @@ export function commitValidatedImport(
     const insertSector = db.prepare(
       `INSERT INTO sectors (batch_id, sector_code, sector_name, monthly_target, is_original_sector) VALUES (?, ?, ?, ?, ?)`
     );
-    for (const s of staged.sectors) {
+    for (const s of mergedSectors) {
       insertSector.run(batchId, s.sectorCode, s.sectorName, s.monthlyTarget, s.isOriginal);
     }
 
     const insertChain = db.prepare(
       `INSERT INTO departments_chains (batch_id, chain_code, chain_name, department_name, sector_name, supervisor_name) VALUES (?, ?, ?, ?, ?, ?)`
     );
-    for (const c of staged.chains) {
+    for (const c of mergedChains) {
       insertChain.run(batchId, c.chainCode, c.chainName, c.departmentName, c.sectorName, c.supervisorName);
     }
 
     const insertBranch = db.prepare(
       `INSERT INTO branches (batch_id, branch_code, branch_name, sector_name, branch_target, chain_code, chain_name, rep_code, rep_name, supervisor_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
-    for (const b of staged.branches) {
+    for (const b of mergedBranches) {
       insertBranch.run(
         batchId,
         b.branchCode,
@@ -1722,14 +2349,14 @@ export function commitValidatedImport(
     const insertRep = db.prepare(
       `INSERT INTO sales_reps (batch_id, rep_code, rep_name, sector_name, supervisor_name, monthly_target) VALUES (?, ?, ?, ?, ?, ?)`
     );
-    for (const r of staged.reps) {
+    for (const r of mergedReps) {
       insertRep.run(batchId, r.repCode, r.repName, r.sectorName, r.supervisorName, r.monthlyTarget);
     }
 
     const insertItem = db.prepare(
       `INSERT INTO items (batch_id, item_code, item_name, category_name, brand_name, unit_name, chains_category, army_category, top_retail_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
-    for (const it of staged.items) {
+    for (const it of mergedItems) {
       insertItem.run(
         batchId,
         it.itemCode,
@@ -1746,7 +2373,7 @@ export function commitValidatedImport(
     const insertCatTarget = db.prepare(
       `INSERT INTO category_targets (batch_id, sector_name, job_title, employee_code, employee_name, category_name, target_value) VALUES (?, ?, ?, ?, ?, ?, ?)`
     );
-    for (const ct of staged.categoryTargets) {
+    for (const ct of mergedCatTargets) {
       insertCatTarget.run(batchId, ct.sectorName, ct.jobTitle, ct.employeeCode, ct.employeeName, ct.categoryName, ct.targetValue);
     }
 
@@ -1761,7 +2388,7 @@ export function commitValidatedImport(
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
 
-    for (const rec of staged.salesRecords) {
+    for (const rec of allSalesRecords) {
       insertSale.run(
         batchId,
         rec.sourceType,
@@ -1795,14 +2422,14 @@ export function commitValidatedImport(
       filename: staged.filename,
       importedByName: user.fullName,
       status: 'active' as const,
-      vf05nCount: report.comparison.vf05n.count,
-      vf05nSalesTotal: report.comparison.vf05n.salesTotal,
-      vf05nTaxTotal: report.comparison.vf05n.taxTotal,
-      zsalesCount: report.comparison.zsales.count,
-      zsalesSalesTotal: report.comparison.zsales.salesTotal,
-      zsalesTaxTotal: report.comparison.zsales.taxTotal,
-      unlinkedBranchCount: report.linkStats.vf05nBranchUnlinkedRows,
-      unlinkedSectorCount: report.linkStats.vf05nSectorUnlinkedRows,
+      vf05nCount,
+      vf05nSalesTotal,
+      vf05nTaxTotal,
+      zsalesCount,
+      zsalesSalesTotal,
+      zsalesTaxTotal,
+      unlinkedBranchCount,
+      unlinkedSectorCount,
       createdAt: now,
     };
   });

@@ -47,6 +47,7 @@ import {
   canonicalizeSectorName,
   commitValidatedImport,
   generateStandardTemplateWorkbook,
+  getActiveSalesPeriods,
   ORIGINAL_SECTORS,
   rollbackToBatch,
   validateExcelBuffer,
@@ -460,7 +461,8 @@ async function startServer() {
     try {
       const decodedFilename = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
       const filename = /[\u0600-\u06FF]/.test(decodedFilename) ? decodedFilename : req.file.originalname;
-      const report = validateExcelBuffer(req.file.buffer, filename);
+      const existingPeriods = getActiveSalesPeriods(db);
+      const report = validateExcelBuffer(req.file.buffer, filename, existingPeriods);
       res.json(report);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'تعذر تحليل ملف Excel';
