@@ -25,7 +25,7 @@ import {
   ORIGINAL_SECTORS,
   stripLeadingZeros,
 } from './excel-engine.ts';
-import { AuthorizationError } from './auth.ts';
+import { AuthorizationError } from '../src/utils/errors.ts';
 
 export function calculateAchievementPct(sales: number, target: number, tax: number): number | null {
   const denominator = target - tax;

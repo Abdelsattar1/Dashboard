@@ -74,13 +74,7 @@ export function verifyToken(token: string): TokenPayload | null {
   }
 }
 
-export class AuthorizationError extends Error {
-  status = 403;
-  constructor(message: string) {
-    super(message);
-    this.name = 'AuthorizationError';
-  }
-}
+export { AuthorizationError } from '../src/utils/errors.ts';
 
 export function normalizeUserRole(raw: unknown): UserRole {
   const val = String(raw || '').trim();

@@ -1,14 +1,22 @@
 import React, { useState } from 'react';
-import { BarChart3, Lock, ShieldCheck, User } from 'lucide-react';
+import { BarChart3, KeyRound, Lock, ShieldCheck, User } from 'lucide-react';
 import type { LoginResponse, UserProfile } from '../types/bi';
 import { apiRequest, setAuthToken } from '../utils/api';
+import { CLIENT_DEFAULT_ADMIN_SEED, CLIENT_DEFAULT_ADMIN_USERNAME } from '../utils/client-auth';
 
 interface LoginViewProps {
   needsSetup: boolean;
+  clientMode?: boolean;
+  defaultAdminAvailable?: boolean;
   onAuthenticated: (user: UserProfile) => void;
 }
 
-export const LoginView: React.FC<LoginViewProps> = ({ needsSetup, onAuthenticated }) => {
+export const LoginView: React.FC<LoginViewProps> = ({
+  needsSetup,
+  clientMode = false,
+  defaultAdminAvailable = false,
+  onAuthenticated,
+}) => {
   const [username, setUsername] = useState(needsSetup ? 'admin' : '');
   const [fullName, setFullName] = useState(needsSetup ? 'مدير النظام' : '');
   const [email, setEmail] = useState('');
@@ -47,6 +55,12 @@ export const LoginView: React.FC<LoginViewProps> = ({ needsSetup, onAuthenticate
     }
   };
 
+  const handleFillDefaultAdmin = () => {
+    setUsername(CLIENT_DEFAULT_ADMIN_USERNAME);
+    setPassword(CLIENT_DEFAULT_ADMIN_SEED);
+    setError(null);
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center p-6">
       <div className="w-full max-w-md bg-white border border-slate-200 rounded-xl p-8">
@@ -71,11 +85,48 @@ export const LoginView: React.FC<LoginViewProps> = ({ needsSetup, onAuthenticate
             </p>
           </div>
         ) : (
-          <div className="mb-5">
-            <h2 className="text-base font-semibold text-slate-900">تسجيل الدخول</h2>
-            <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-              أدخل بيانات حسابك للوصول إلى لوحة المعلومات والقطاعات المصرح لك بها (أدمن، مدير قطاع/إدارة، أو مستخدم قياسي).
-            </p>
+          <div className="mb-5 space-y-3">
+            <div>
+              <h2 className="text-base font-semibold text-slate-900">تسجيل الدخول</h2>
+              <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                أدخل بيانات حسابك للوصول إلى لوحة المعلومات والقطاعات المصرح لك بها (أدمن، مدير قطاع/إدارة، أو مستخدم قياسي).
+              </p>
+            </div>
+
+            {clientMode && defaultAdminAvailable && (
+              <div className="p-3.5 bg-teal-50/80 border border-teal-200 rounded-lg text-xs text-teal-950 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold flex items-center gap-1.5 text-teal-900">
+                    <KeyRound className="w-3.5 h-3.5 text-teal-700 shrink-0" />
+                    بيانات الدخول الافتراضية لمدير النظام
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleFillDefaultAdmin}
+                    className="px-2.5 py-1 bg-teal-700 hover:bg-teal-800 text-white rounded text-[11px] font-semibold transition-colors cursor-pointer shrink-0"
+                  >
+                    تعبئة تلقائية
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-2 bg-white border border-teal-100 rounded p-2 font-num">
+                  <div>
+                    <span className="text-slate-500">اسم المستخدم: </span>
+                    <span className="font-bold text-slate-900" dir="ltr">
+                      {CLIENT_DEFAULT_ADMIN_USERNAME}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500">كلمة المرور: </span>
+                    <span className="font-bold text-slate-900" dir="ltr">
+                      {CLIENT_DEFAULT_ADMIN_SEED}
+                    </span>
+                  </div>
+                </div>
+                <p className="text-[11px] text-teal-800 leading-relaxed">
+                  يعمل التطبيق بالكامل داخل المتصفح مع حفظ المستخدمين والأهداف والبيانات تلقائياً في قاعدة بيانات المتصفح. يُوصى بتغيير كلمة المرور بعد تسجيل الدخول.
+                </p>
+              </div>
+            )}
           </div>
         )}
 

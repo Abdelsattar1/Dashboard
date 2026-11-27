@@ -15,7 +15,7 @@ import {
   ORIGINAL_SECTORS,
   stripLeadingZeros,
 } from './excel-engine.ts';
-import { AuthorizationError } from './auth.ts';
+import { AuthorizationError } from '../src/utils/errors.ts';
 
 export function classifyClassA(rawClassA: string): ClassAType {
   const norm = normalizeArabic(rawClassA).replace(/\s+/g, '');

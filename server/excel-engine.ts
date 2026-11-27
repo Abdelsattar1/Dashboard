@@ -1,4 +1,3 @@
-import crypto from 'crypto';
 import type Database from 'better-sqlite3';
 import * as XLSXModule from 'xlsx';
 import type {
@@ -408,7 +407,7 @@ function pruneExpiredStages() {
   }
 }
 
-export function validateExcelBuffer(buffer: Buffer, filename: string): ImportValidationReport {
+export function validateExcelBuffer(buffer: Uint8Array | ArrayBuffer, filename: string): ImportValidationReport {
   pruneExpiredStages();
 
   const errors: ValidationIssue[] = [];
@@ -417,9 +416,10 @@ export function validateExcelBuffer(buffer: Buffer, filename: string): ImportVal
 
   let wb: XLSXModule.WorkBook;
   try {
-    wb = XLSX.read(buffer, { type: 'buffer', cellDates: false });
+    const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+    wb = XLSX.read(bytes, { type: 'array', cellDates: false });
   } catch (err) {
-    const token = crypto.randomUUID();
+    const token = globalThis.crypto.randomUUID();
     const msg = err instanceof Error ? err.message : 'ملف Excel غير صالح';
     errors.push({
       severity: 'error',
@@ -1578,7 +1578,7 @@ export function validateExcelBuffer(buffer: Buffer, filename: string): ImportVal
   const totalSectorTargets = sectorsList.reduce((acc, s) => acc + s.monthlyTarget, 0);
   const directBranchesTargetTotal = branchesList.reduce((acc, b) => acc + b.branchTarget, 0);
 
-  const validationToken = crypto.randomUUID();
+  const validationToken = globalThis.crypto.randomUUID();
   const canCommit = errors.length === 0;
 
   const report: ImportValidationReport = {
@@ -1651,7 +1651,7 @@ export function commitValidatedImport(
   }
 
   const now = new Date().toISOString();
-  const batchUuid = crypto.randomUUID();
+  const batchUuid = globalThis.crypto.randomUUID();
   const { report } = staged;
 
   const tx = db.transaction(() => {
@@ -1859,7 +1859,7 @@ export function rollbackToBatch(db: Database.Database, batchId: number): ImportB
   };
 }
 
-export function generateStandardTemplateWorkbook(): Buffer {
+export function generateStandardTemplateWorkbook(): Uint8Array {
   const wb = XLSX.utils.book_new();
 
   const sheetsData: Record<string, string[][]> = {
@@ -1884,5 +1884,5 @@ export function generateStandardTemplateWorkbook(): Buffer {
     XLSX.utils.book_append_sheet(wb, ws, name);
   }
 
-  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  return new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer);
 }

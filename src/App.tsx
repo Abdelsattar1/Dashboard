@@ -98,6 +98,8 @@ const NAV_ITEMS: Array<{ id: NavSection; label: string; icon: React.FC<{ classNa
 export default function App() {
   const [authChecked, setAuthChecked] = useState(false);
   const [needsSetup, setNeedsSetup] = useState(false);
+  const [clientMode, setClientMode] = useState(false);
+  const [defaultAdminAvailable, setDefaultAdminAvailable] = useState(false);
   const [user, setUser] = useState<UserProfile | null>(null);
 
   const [section, setSection] = useState<NavSection>('dashboard');
@@ -220,6 +222,8 @@ export default function App() {
     try {
       const status = await apiRequest<AuthStatusResponse>('/api/auth/status');
       setNeedsSetup(status.needsSetup);
+      setClientMode(Boolean(status.clientMode));
+      setDefaultAdminAvailable(Boolean(status.defaultAdminAvailable));
     } catch {
       setNeedsSetup(false);
     } finally {
@@ -351,6 +355,10 @@ export default function App() {
         body: JSON.stringify({ currentPassword: currentPw, newPassword: newPw }),
       });
       setPwSuccess('تم تحديث كلمة المرور بنجاح.');
+      if (user?.username === 'admin') {
+        setDefaultAdminAvailable(false);
+        setUser((prev) => (prev ? { ...prev, mustChangePassword: false } : prev));
+      }
       setCurrentPw('');
       setNewPw('');
       setConfirmPw('');
@@ -373,6 +381,8 @@ export default function App() {
     return (
       <LoginView
         needsSetup={needsSetup}
+        clientMode={clientMode}
+        defaultAdminAvailable={defaultAdminAvailable}
         onAuthenticated={(loggedInUser) => {
           const userSectors = resolveUserSectors(loggedInUser);
           setUser(loggedInUser);

@@ -16,6 +16,8 @@ export interface UserProfile {
 export interface AuthStatusResponse {
   needsSetup: boolean;
   hasEnvPasscode: boolean;
+  clientMode?: boolean;
+  defaultAdminAvailable?: boolean;
 }
 
 export interface LoginResponse {

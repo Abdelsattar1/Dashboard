@@ -536,7 +536,7 @@ async function startServer() {
   });
 
   app.get('/api/import/template', requireAuth, requireAdmin, (_req, res) => {
-    const buffer = generateStandardTemplateWorkbook();
+    const buffer = Buffer.from(generateStandardTemplateWorkbook());
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="FMCG_Sales_Template.xlsx"');
     res.send(buffer);
@@ -817,6 +817,7 @@ async function startServer() {
         'vite.config.ts',
         'index.html',
         'metadata.json',
+        'vercel.json',
         '.env.example',
         'server.ts',
         'src',
