@@ -51,7 +51,14 @@ import {
   rollbackToBatch,
   validateExcelBuffer,
 } from './server/excel-engine.ts';
-import type { ImportBatchHistoryItem, SalesSource, UserRole } from './src/types/bi.ts';
+import {
+  enrichAuditWithGemini,
+  executeAutoFix,
+  recordRuntimeError,
+  rollbackAutoFix,
+  runSmartAudit,
+} from './server/smart-auditor.ts';
+import type { AutoFixActionType, ImportBatchHistoryItem, SalesSource, UserRole } from './src/types/bi.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -714,6 +721,89 @@ async function startServer() {
     }
     db.prepare('DELETE FROM users WHERE id = ?').run(targetId);
     res.json({ success: true });
+  });
+
+  // ==================== SMART AUDITOR & RUNTIME ERROR MONITORING ROUTES ====================
+  const ALLOWED_AUTOFIX_ACTIONS = new Set<AutoFixActionType>([
+    'FIX_NON_FINITE_NUMBERS',
+    'FIX_DUPLICATE_BRANCH_RECORDS',
+    'FIX_DUPLICATE_ITEM_CATALOG',
+    'FIX_SYNC_COMPETITION_TARGET_TOTALS',
+    'FIX_CANONICALIZE_TARGETS_AND_SCOPES',
+    'FIX_RESOLVE_RUNTIME_ERRORS',
+  ]);
+
+  // Any authenticated user's client runtime errors are recorded silently for Admin inspection
+  app.post('/api/audit/runtime-errors', requireAuth, (req: AuthenticatedRequest, res) => {
+    const body = (req.body || {}) as {
+      kind?: string;
+      tabName?: string;
+      message?: string;
+      stack?: string;
+      sourceUrl?: string;
+      lineNo?: number;
+      colNo?: number;
+    };
+    const msg = String(body.message || '').trim();
+    if (!msg) {
+      res.status(400).json({ error: 'رسالة الخطأ مطلوبة' });
+      return;
+    }
+    const log = recordRuntimeError(
+      db,
+      req.user ? { id: req.user.id, username: req.user.username } : undefined,
+      body
+    );
+    res.status(201).json({ recorded: true, id: log.id });
+  });
+
+  app.get('/api/admin/audit/latest', requireAuth, requireAdmin, (req: AuthenticatedRequest, res) => {
+    const report = runSmartAudit(db, req.user!);
+    res.json({ report });
+  });
+
+  app.post('/api/admin/audit/run', requireAuth, requireAdmin, (req: AuthenticatedRequest, res) => {
+    const report = runSmartAudit(db, req.user!);
+    res.json({ report });
+  });
+
+  app.post('/api/admin/audit/ai-analyze', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res) => {
+    try {
+      const result = await enrichAuditWithGemini(db, req.user!);
+      res.json(result);
+    } catch (err) {
+      res.status(502).json({
+        error: err instanceof Error ? err.message : 'تعذر إجراء التحليل الإضافي عبر الذكاء الاصطناعي',
+      });
+    }
+  });
+
+  app.post('/api/admin/audit/autofix', requireAuth, requireAdmin, (req: AuthenticatedRequest, res) => {
+    const { actionType, findingCode } = req.body as { actionType?: string; findingCode?: string };
+    if (!actionType || !ALLOWED_AUTOFIX_ACTIONS.has(actionType as AutoFixActionType)) {
+      res.status(400).json({ error: 'نوع الإصلاح التلقائي غير مدعوم' });
+      return;
+    }
+    try {
+      const result = executeAutoFix(db, req.user!, actionType as AutoFixActionType, findingCode);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'تعذر تنفيذ الإصلاح التلقائي' });
+    }
+  });
+
+  app.post('/api/admin/audit/rollback/:backupId', requireAuth, requireAdmin, (req: AuthenticatedRequest, res) => {
+    const backupId = Number(req.params.backupId);
+    if (!Number.isInteger(backupId) || backupId <= 0) {
+      res.status(400).json({ error: 'معرف النسخة الاحتياطية غير صالح' });
+      return;
+    }
+    try {
+      const result = rollbackAutoFix(db, req.user!, backupId);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'تعذر استعادة النسخة الاحتياطية' });
+    }
   });
 
   // ==================== EXPORT PROJECT ZIP FOR WINDOWS 10 ====================

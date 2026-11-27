@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@fontsource/cairo": "^5.3.0",
-    "@google/genai": "^2.4.0",
+    "@google/genai": "^3.6.1",
     "@tailwindcss/vite": "^4.3.3",
     "@types/better-sqlite3": "^9.6.0",
     "@types/multer": "^2.3.0",

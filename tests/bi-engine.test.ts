@@ -27,6 +27,7 @@ import {
 } from '../server/competitions-engine.ts';
 import { initDatabase } from '../server/db.ts';
 import { commitValidatedImport, excelSerialToIsoDate, rollbackToBatch, validateExcelBuffer } from '../server/excel-engine.ts';
+import { executeAutoFix, recordRuntimeError, rollbackAutoFix, runSmartAudit } from '../server/smart-auditor.ts';
 import type { UserProfile } from '../src/types/bi.ts';
 
 function buildReferenceTestWorkbook(): Buffer {
@@ -2438,7 +2439,120 @@ function runTests() {
     24
   );
 
-  console.log('All Sales BI Engine tests PASSED (21/21 assertion groups verified).');
+  // =========================================================================
+  // 22. Smart Auditor (`المراجع الذكي`): Runtime Error Monitor, System Audit,
+  //     Safe Auto-Fix with Backup Snapshot, and Exact Rollback Restoration
+  // =========================================================================
+  // Ensure at least one active admin exists in `users` for RBAC check
+  db.prepare(
+    `INSERT OR IGNORE INTO users (username, full_name, role, allowed_sectors, password_hash, must_change_password, is_active, created_at)
+     VALUES ('smart_admin', 'مدير المراجعة', 'admin', ?, 'hash', 0, 1, ?)`
+  ).run(JSON.stringify(['التوريد المباشر', 'التوريد المركزي', 'التوب ريتيل', 'الجيش']), new Date().toISOString());
+
+  // 22a. Clean audit pass check (no runtime errors, no numeric corruption, RBAC probes pass)
+  const cleanAudit = runSmartAudit(db, adminUser);
+  assert.ok(cleanAudit.checksExecuted.find((c) => c.key === 'numeric_integrity')!.passed);
+  assert.ok(cleanAudit.checksExecuted.find((c) => c.key === 'rbac_permissions')!.passed);
+  assert.ok(cleanAudit.checksExecuted.find((c) => c.key === 'runtime_errors')!.passed);
+
+  // 22b. Runtime error capture & 60s deduplication + readyPrompt generation
+  const errLog1 = recordRuntimeError(
+    db,
+    { id: 1, username: 'smart_admin' },
+    {
+      kind: 'runtime_error',
+      tabName: 'مسابقات',
+      message: 'Maximum update depth exceeded inside CompetitionsView',
+      stack: 'Error: Maximum update depth exceeded\n  at CompetitionsView (CompetitionsView.tsx:120)',
+    }
+  );
+  const errLogDup = recordRuntimeError(
+    db,
+    { id: 1, username: 'smart_admin' },
+    {
+      kind: 'runtime_error',
+      tabName: 'مسابقات',
+      message: 'Maximum update depth exceeded inside CompetitionsView',
+      stack: 'Error: Maximum update depth exceeded\n  at CompetitionsView (CompetitionsView.tsx:120)',
+    }
+  );
+  assert.equal(errLogDup.id, errLog1.id, 'Identical errors within 60s must deduplicate');
+
+  const auditWithErr = runSmartAudit(db, adminUser);
+  const runtimeFinding = auditWithErr.findings.find((f) => f.id === `RUNTIME_ERR_${errLog1.id}`)!;
+  assert.ok(runtimeFinding, 'Runtime error finding must surface in Admin Smart Audit');
+  assert.equal(runtimeFinding.severity, 'critical');
+  assert.ok(runtimeFinding.readyPrompt && runtimeFinding.readyPrompt.includes('مسابقات'));
+
+  // 22c. Inject negative/non-finite target, duplicate branch row, and competition total desync -> detect -> autofix -> rollback
+  db.prepare(`INSERT INTO item_category_targets (target_key, sector_name, job_title, employee_name, category_name, target_value, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    .run('bad::key::1', 'التوريد المباشر', 'مندوب مبيعات', 'اختبار', 'بسكويت + حلويات', -500, new Date().toISOString());
+
+  const activeBatchRow = db.prepare(`SELECT id FROM import_batches WHERE status = 'active' ORDER BY id DESC LIMIT 1`).get() as { id: number };
+  const sampleBranch = db.prepare(`SELECT * FROM branches WHERE batch_id = ? LIMIT 1`).get(activeBatchRow.id) as {
+    batch_id: number;
+    branch_code: string;
+    branch_name: string;
+    sector_name: string;
+    branch_target: number;
+    chain_code: string | null;
+    chain_name: string;
+    rep_code: string | null;
+    rep_name: string;
+    supervisor_name: string;
+  };
+  db.prepare(
+    `INSERT INTO branches (batch_id, branch_code, branch_name, sector_name, branch_target, chain_code, chain_name, rep_code, rep_name, supervisor_name)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    sampleBranch.batch_id,
+    sampleBranch.branch_code,
+    sampleBranch.branch_name,
+    sampleBranch.sector_name,
+    250,
+    sampleBranch.chain_code,
+    sampleBranch.chain_name,
+    sampleBranch.rep_code,
+    sampleBranch.rep_name,
+    sampleBranch.supervisor_name
+  );
+  const countBranchesBeforeFix = (db.prepare(`SELECT COUNT(*) AS cnt FROM branches WHERE batch_id = ?`).get(activeBatchRow.id) as { cnt: number }).cnt;
+
+  db.prepare(`UPDATE competition_targets SET target_qty = 999 WHERE competition_id = ? AND industrial_target_qty > 0`).run(classAComp.id);
+
+  const dirtyAudit = runSmartAudit(db, adminUser);
+  assert.ok(dirtyAudit.findings.some((f) => f.code === 'NUM_DB_NON_FINITE'), 'Must detect negative/non-finite DB numeric values');
+  assert.ok(dirtyAudit.findings.some((f) => f.code === 'DUP_BRANCH_ROWS'), 'Must detect duplicate branch codes');
+  assert.ok(dirtyAudit.findings.some((f) => f.code === 'COMP_TARGET_TOTAL_DESYNC'), 'Must detect desynced competition target totals');
+
+  const fixNumRes = executeAutoFix(db, adminUser, 'FIX_NON_FINITE_NUMBERS', 'NUM_DB_NON_FINITE');
+  assert.ok(fixNumRes.backupId > 0);
+  const fixedTargetRow = db.prepare(`SELECT target_value FROM item_category_targets WHERE target_key = 'bad::key::1'`).get() as { target_value: number };
+  assert.equal(fixedTargetRow.target_value, 0, 'Negative target must be sanitized to 0');
+
+  const fixDupBrRes = executeAutoFix(db, adminUser, 'FIX_DUPLICATE_BRANCH_RECORDS', 'DUP_BRANCH_ROWS');
+  const countBranchesAfterFix = (db.prepare(`SELECT COUNT(*) AS cnt FROM branches WHERE batch_id = ?`).get(activeBatchRow.id) as { cnt: number }).cnt;
+  assert.equal(countBranchesAfterFix, countBranchesBeforeFix - 1, 'Duplicate branch row must be merged & removed');
+  assert.ok(!fixDupBrRes.report.findings.some((f) => f.code === 'DUP_BRANCH_ROWS'));
+
+  const fixCompSync = executeAutoFix(db, adminUser, 'FIX_SYNC_COMPETITION_TARGET_TOTALS', 'COMP_TARGET_TOTAL_DESYNC');
+  assert.ok(!fixCompSync.report.findings.some((f) => f.code === 'COMP_TARGET_TOTAL_DESYNC'));
+
+  const fixErrArchive = executeAutoFix(db, adminUser, 'FIX_RESOLVE_RUNTIME_ERRORS', 'RUNTIME_ERR_ARCHIVE');
+  assert.equal(fixErrArchive.report.runtimeErrors.length, 0);
+
+  // Verify Rollback restores exact pre-fix state
+  const rollbackNum = rollbackAutoFix(db, adminUser, fixNumRes.backupId);
+  const restoredTargetRow = db.prepare(`SELECT target_value FROM item_category_targets WHERE target_key = 'bad::key::1'`).get() as { target_value: number };
+  assert.equal(restoredTargetRow.target_value, -500, 'Rollback must restore exact pre-fix numeric snapshot');
+  assert.ok(rollbackNum.report.backups.find((b) => b.id === fixNumRes.backupId)!.restoredAt !== null);
+
+  const rollbackDupBr = rollbackAutoFix(db, adminUser, fixDupBrRes.backupId);
+  const countBranchesAfterRollback = (db.prepare(`SELECT COUNT(*) AS cnt FROM branches WHERE batch_id = ?`).get(activeBatchRow.id) as { cnt: number }).cnt;
+  assert.equal(countBranchesAfterRollback, countBranchesBeforeFix, 'Rollback must restore exact pre-fix branch rows');
+  assert.ok(rollbackDupBr.report.findings.some((f) => f.code === 'DUP_BRANCH_ROWS'));
+
+  console.log('All Sales BI Engine tests PASSED (22/22 assertion groups verified).');
 }
 
 runTests();

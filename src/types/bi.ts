@@ -420,3 +420,88 @@ export interface CompetitionAnalyticsResponse {
   };
 }
 
+export type AuditSeverity = 'critical' | 'high' | 'medium' | 'low';
+export type AuditCategory = 'numeric_integrity' | 'data_consistency' | 'rbac_permissions' | 'runtime_error';
+export type AuditFixType = 'auto_fixable' | 'code_fix_required' | 'info';
+
+export type AutoFixActionType =
+  | 'FIX_NON_FINITE_NUMBERS'
+  | 'FIX_DUPLICATE_BRANCH_RECORDS'
+  | 'FIX_DUPLICATE_ITEM_CATALOG'
+  | 'FIX_SYNC_COMPETITION_TARGET_TOTALS'
+  | 'FIX_CANONICALIZE_TARGETS_AND_SCOPES'
+  | 'FIX_RESOLVE_RUNTIME_ERRORS';
+
+export interface AuditFinding {
+  id: string;
+  code: string;
+  title: string;
+  description: string;
+  severity: AuditSeverity;
+  category: AuditCategory;
+  fixType: AuditFixType;
+  affectedArea: string;
+  details: string[];
+  autoFixAction?: AutoFixActionType;
+  autoFixLabel?: string;
+  readyPrompt?: string;
+  aiInsight?: string;
+}
+
+export interface RuntimeErrorLog {
+  id: number;
+  kind: 'runtime_error' | 'unhandled_rejection' | 'react_error';
+  tabName: string;
+  message: string;
+  stack: string;
+  sourceUrl: string;
+  lineNo: number;
+  colNo: number;
+  username: string;
+  resolved: boolean;
+  aiAnalysis: string;
+  occurredAt: string;
+}
+
+export interface AuditFixBackup {
+  id: number;
+  findingCode: string;
+  actionType: string;
+  actionLabel: string;
+  summary: string;
+  createdByName: string;
+  createdAt: string;
+  restoredAt: string | null;
+}
+
+export interface SmartAuditReport {
+  runId: number;
+  ranAt: string;
+  triggeredByName: string;
+  healthScore: number;
+  aiConfigured: boolean;
+  aiSummary: string;
+  activeBatchId: number | null;
+  activeBatchFilename: string | null;
+  checksExecuted: Array<{
+    key: string;
+    label: string;
+    passed: boolean;
+    issueCount: number;
+  }>;
+  summaryCounts: {
+    total: number;
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+    autoFixable: number;
+    codeFixRequired: number;
+    unresolvedRuntimeErrors: number;
+  };
+  findings: AuditFinding[];
+  runtimeErrors: RuntimeErrorLog[];
+  backups: AuditFixBackup[];
+}
+
+

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BarChart3,
   Building2,
@@ -14,6 +14,7 @@ import {
   Package,
   ReceiptText,
   Shield,
+  ShieldAlert,
   Trophy,
   UserCog,
   Users,
@@ -21,12 +22,14 @@ import {
 } from 'lucide-react';
 import { BranchesView } from './components/BranchesView';
 import { CompetitionsView } from './components/CompetitionsView';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { ExecutiveDashboard } from './components/ExecutiveDashboard';
 import { ImportAdminView, type ImportAdminSubTab } from './components/ImportAdminView';
 import { ItemsView } from './components/ItemsView';
 import { LoginView } from './components/LoginView';
 import { RepsView } from './components/RepsView';
 import { SectorsView } from './components/SectorsView';
+import { SmartAuditorView } from './components/SmartAuditorView';
 import { TimelineView } from './components/TimelineView';
 import { TransactionsView } from './components/TransactionsView';
 import type {
@@ -58,7 +61,8 @@ type NavSection =
   | 'competitions'
   | 'timeline'
   | 'transactions'
-  | 'import-admin';
+  | 'import-admin'
+  | 'smart-audit';
 
 const ALL_SECTORS = ['التوريد المباشر', 'التوريد المركزي', 'التوب ريتيل', 'الجيش'];
 const EMPTY_SECTORS: SectorMetricRow[] = [];
@@ -88,6 +92,7 @@ const NAV_ITEMS: Array<{ id: NavSection; label: string; icon: React.FC<{ classNa
   { id: 'timeline', label: 'التحليل الزمني', icon: CalendarRange },
   { id: 'transactions', label: 'تفاصيل المبيعات', icon: ReceiptText },
   { id: 'import-admin', label: 'استيراد البيانات والنظام', icon: Database, adminOnly: true },
+  { id: 'smart-audit', label: 'المراجع الذكي والفحص', icon: ShieldAlert, adminOnly: true },
 ];
 
 export default function App() {
@@ -139,6 +144,77 @@ export default function App() {
   const [loading, setLoading] = useState(false);
 
   const authorizedSectors = useMemo(() => resolveUserSectors(user), [user]);
+  const userRef = useRef<UserProfile | null>(null);
+  userRef.current = user;
+  const activeTabLabelRef = useRef<string>('لوحة المعلومات الرئيسية');
+  const activeNavMeta = NAV_ITEMS.find((i) => i.id === section);
+  activeTabLabelRef.current = activeNavMeta?.label ?? 'لوحة المعلومات الرئيسية';
+
+  const sendRuntimeErrorReport = useCallback(
+    (payload: {
+      kind: 'runtime_error' | 'unhandled_rejection' | 'react_error';
+      message: string;
+      stack?: string;
+      sourceUrl?: string;
+      lineNo?: number;
+      colNo?: number;
+    }) => {
+      if (!userRef.current) return;
+      const msg = String(payload.message || '').trim();
+      if (!msg || msg.includes('/api/audit/runtime-errors')) return;
+      apiRequest('/api/audit/runtime-errors', {
+        method: 'POST',
+        body: JSON.stringify({
+          kind: payload.kind,
+          tabName: activeTabLabelRef.current,
+          message: msg.slice(0, 1000),
+          stack: String(payload.stack || '').slice(0, 4000),
+          sourceUrl: String(payload.sourceUrl || '').slice(0, 500),
+          lineNo: payload.lineNo || 0,
+          colNo: payload.colNo || 0,
+        }),
+      }).catch(() => {
+        // Silent best-effort error capture
+      });
+    },
+    []
+  );
+
+  useEffect(() => {
+    const onWindowError = (event: ErrorEvent) => {
+      sendRuntimeErrorReport({
+        kind: 'runtime_error',
+        message: event.message || (event.error instanceof Error ? event.error.message : 'Uncaught Window Error'),
+        stack: event.error instanceof Error ? event.error.stack || '' : '',
+        sourceUrl: event.filename || '',
+        lineNo: event.lineno || 0,
+        colNo: event.colno || 0,
+      });
+    };
+
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      const msg =
+        reason instanceof Error
+          ? reason.message
+          : typeof reason === 'string'
+            ? reason
+            : 'Unhandled Promise Rejection';
+      const stack = reason instanceof Error ? reason.stack || '' : '';
+      sendRuntimeErrorReport({
+        kind: 'unhandled_rejection',
+        message: msg,
+        stack,
+      });
+    };
+
+    window.addEventListener('error', onWindowError);
+    window.addEventListener('unhandledrejection', onUnhandledRejection);
+    return () => {
+      window.removeEventListener('error', onWindowError);
+      window.removeEventListener('unhandledrejection', onUnhandledRejection);
+    };
+  }, [sendRuntimeErrorReport]);
 
   const checkAuthStatus = useCallback(async () => {
     try {
@@ -478,7 +554,7 @@ export default function App() {
         </header>
 
         {/* Workspace Filter Toolbar (below header, outside Top Bar Contract) */}
-        {section !== 'import-admin' && (
+        {section !== 'import-admin' && section !== 'smart-audit' && (
           <div className="bg-white border-b border-slate-200 px-6 py-3 flex flex-wrap items-center justify-between gap-4">
             <div className="flex flex-wrap items-center gap-3">
               {/* Single-source selector (NEVER summed together) */}
@@ -586,6 +662,16 @@ export default function App() {
 
         {/* Main Viewport */}
         <main className="flex-1 p-5 lg:p-6 max-w-[1600px] w-full mx-auto">
+          <ErrorBoundary
+            tabLabel={currentNavLabel}
+            onErrorCaptured={(error, componentStack) => {
+              sendRuntimeErrorReport({
+                kind: 'react_error',
+                message: error.message || 'React Render Error',
+                stack: [error.stack || '', componentStack || ''].filter(Boolean).join('\n'),
+              });
+            }}
+          >
           {section === 'dashboard' && (
             <ExecutiveDashboard
               data={dashData}
@@ -712,6 +798,15 @@ export default function App() {
               }}
             />
           )}
+
+          {section === 'smart-audit' && isAdmin && (
+            <SmartAuditorView
+              onDataMutated={() => {
+                setRefreshTick((t) => t + 1);
+              }}
+            />
+          )}
+          </ErrorBoundary>
         </main>
       </div>
 

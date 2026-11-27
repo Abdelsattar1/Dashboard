@@ -196,6 +196,50 @@ export function initDatabase(customPath?: string): Database.Database {
       is_return INTEGER NOT NULL DEFAULT 0
     );
 
+    CREATE TABLE IF NOT EXISTS runtime_error_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL DEFAULT 'runtime_error',
+      tab_name TEXT NOT NULL DEFAULT '',
+      message TEXT NOT NULL,
+      stack TEXT NOT NULL DEFAULT '',
+      source_url TEXT NOT NULL DEFAULT '',
+      line_no INTEGER NOT NULL DEFAULT 0,
+      col_no INTEGER NOT NULL DEFAULT 0,
+      user_id INTEGER,
+      username TEXT NOT NULL DEFAULT '',
+      resolved INTEGER NOT NULL DEFAULT 0,
+      ai_analysis TEXT NOT NULL DEFAULT '',
+      occurred_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS audit_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      triggered_by_id INTEGER REFERENCES users(id),
+      triggered_by_name TEXT NOT NULL DEFAULT '',
+      health_score INTEGER NOT NULL DEFAULT 100,
+      total_findings INTEGER NOT NULL DEFAULT 0,
+      critical_count INTEGER NOT NULL DEFAULT 0,
+      high_count INTEGER NOT NULL DEFAULT 0,
+      medium_count INTEGER NOT NULL DEFAULT 0,
+      low_count INTEGER NOT NULL DEFAULT 0,
+      findings_json TEXT NOT NULL DEFAULT '[]',
+      ai_summary TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS audit_fix_backups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      finding_code TEXT NOT NULL,
+      action_type TEXT NOT NULL,
+      action_label TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      snapshot_json TEXT NOT NULL,
+      created_by_id INTEGER REFERENCES users(id),
+      created_by_name TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      restored_at TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_sales_batch_source ON sales_records(batch_id, source_type);
     CREATE INDEX IF NOT EXISTS idx_sales_sector ON sales_records(batch_id, source_type, resolved_sector);
     CREATE INDEX IF NOT EXISTS idx_sales_branch ON sales_records(batch_id, source_type, resolved_branch_code);
@@ -206,6 +250,9 @@ export function initDatabase(customPath?: string): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_comp_items_comp ON competition_items(competition_id);
     CREATE INDEX IF NOT EXISTS idx_comp_targets_comp ON competition_targets(competition_id);
     CREATE INDEX IF NOT EXISTS idx_item_cat_targets_key ON item_category_targets(target_key);
+    CREATE INDEX IF NOT EXISTS idx_runtime_errors_resolved ON runtime_error_logs(resolved, occurred_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_runs_created ON audit_runs(created_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_backups_created ON audit_fix_backups(created_at);
   `);
 
   // Idempotent migration for existing SQLite databases missing supervisor_name on departments_chains
