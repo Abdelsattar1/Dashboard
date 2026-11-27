@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BarChart3,
   Building2,
@@ -37,6 +37,7 @@ import type {
   DashboardSummaryResponse,
   DepartmentChainRow,
   ItemCategoriesAnalyticsResponse,
+  ItemCategoryAnalysisRow,
   RepMetricRow,
   SalesSource,
   SectorMetricRow,
@@ -60,6 +61,12 @@ type NavSection =
   | 'import-admin';
 
 const ALL_SECTORS = ['التوريد المباشر', 'التوريد المركزي', 'التوب ريتيل', 'الجيش'];
+const EMPTY_SECTORS: SectorMetricRow[] = [];
+const EMPTY_AGGREGATIONS: AggregationMetricRow[] = [];
+const EMPTY_CHAINS: DepartmentChainRow[] = [];
+const EMPTY_BRANCHES: BranchMetricRow[] = [];
+const EMPTY_UNLINKED: UnlinkedRecordRow[] = [];
+const EMPTY_ITEM_ROWS: ItemCategoryAnalysisRow[] = [];
 
 function resolveUserSectors(u: UserProfile | null): string[] {
   if (!u) return [];
@@ -130,6 +137,8 @@ export default function App() {
   const [selectedCompetitionId, setSelectedCompetitionId] = useState<number | null>(null);
   const [timelineData, setTimelineData] = useState<TimelinePoint[]>([]);
   const [loading, setLoading] = useState(false);
+
+  const authorizedSectors = useMemo(() => resolveUserSectors(user), [user]);
 
   const checkAuthStatus = useCallback(async () => {
     try {
@@ -307,7 +316,6 @@ export default function App() {
 
   const isAdmin = user.role === 'admin';
   const canEditTargets = canEditTargetsRole(user.role);
-  const authorizedSectors = resolveUserSectors(user);
   const isSingleSectorScoped = !isAdmin && authorizedSectors.length === 1;
   const effectiveSectorFilter = isSingleSectorScoped ? authorizedSectors[0] : sectorFilter;
   const visibleNavItems = NAV_ITEMS.filter((item) => !item.adminOnly || isAdmin);
@@ -600,9 +608,9 @@ export default function App() {
 
           {section === 'sectors' && (
             <SectorsView
-              sectors={sectorsData?.sectors ?? []}
-              aggregations={sectorsData?.aggregations ?? []}
-              chains={sectorsData?.chains ?? []}
+              sectors={sectorsData?.sectors ?? EMPTY_SECTORS}
+              aggregations={sectorsData?.aggregations ?? EMPTY_AGGREGATIONS}
+              chains={sectorsData?.chains ?? EMPTY_CHAINS}
               source={source}
               globalSectorFilter={effectiveSectorFilter}
               startDate={startDate}
@@ -613,8 +621,8 @@ export default function App() {
 
           {section === 'branches' && (
             <BranchesView
-              branches={branchesData?.branches ?? []}
-              unlinkedRecords={branchesData?.unlinkedRecords ?? []}
+              branches={branchesData?.branches ?? EMPTY_BRANCHES}
+              unlinkedRecords={branchesData?.unlinkedRecords ?? EMPTY_UNLINKED}
               totalUnlinkedSales={branchesData?.totalUnlinkedSales ?? 0}
               totalUnlinkedCount={branchesData?.totalUnlinkedCount ?? 0}
               loading={loading}
@@ -641,7 +649,7 @@ export default function App() {
 
           {section === 'items' && (
             <ItemsView
-              rows={itemCategoriesData?.rows ?? []}
+              rows={itemCategoriesData?.rows ?? EMPTY_ITEM_ROWS}
               effectiveSource={itemCategoriesData?.effectiveSource ?? source}
               requestedSource={source}
               selectedSector={effectiveSectorFilter}

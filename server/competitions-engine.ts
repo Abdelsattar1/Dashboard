@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import type {
+  ClassAType,
   CompetitionAnalyticsResponse,
   CompetitionCatalogItem,
   CompetitionItemConfig,
@@ -15,6 +16,24 @@ import {
   stripLeadingZeros,
 } from './excel-engine.ts';
 import { AuthorizationError } from './auth.ts';
+
+export function classifyClassA(rawClassA: string): ClassAType {
+  const norm = normalizeArabic(rawClassA).replace(/\s+/g, '');
+  if (!norm) return 'other';
+  if (norm.includes('صناعي') || norm.includes('صناع')) return 'industrial';
+  if (norm.includes('تجاري') || norm.includes('تجار')) return 'commercial';
+  return 'other';
+}
+
+function normalizeCategoryText(raw: string): string {
+  return normalizeArabic(raw).replace(/\s+/g, '');
+}
+
+const UNCLASSIFIED_CAT_NORM = normalizeCategoryText('غير مصنف');
+
+function isCategoryScopedSectorManagerSector(sec: string): boolean {
+  return sec === 'التوريد المباشر' || sec === 'التوريد المركزي';
+}
 
 function isSalesRepJobTitle(jobTitle: string): boolean {
   return normalizeArabic(jobTitle).includes('مندوب');
@@ -70,7 +89,7 @@ function roundQty(val: number): number {
 }
 
 export function calculateQtyAchievementPct(soldQty: number, targetQty: number): number | null {
-  if (!Number.isFinite(targetQty) || targetQty <= 0) return null;
+  if (!Number.isFinite(soldQty) || !Number.isFinite(targetQty) || targetQty <= 0) return null;
   const pct = (soldQty / targetQty) * 100;
   if (!Number.isFinite(pct)) return null;
   return Number(pct.toFixed(2));
@@ -117,10 +136,12 @@ export function getAvailableCatalogItems(db: Database.Database): CompetitionCata
     const code = normalizeCode(r.item_code);
     if (!code || seen.has(code)) continue;
     seen.add(code);
+    const classA = r.category_name.trim();
     catalog.push({
       itemCode: code,
       itemName: r.item_name.trim() || code,
-      categoryName: r.category_name.trim(),
+      categoryName: classA,
+      classAType: classifyClassA(classA),
       chainsCategory: r.chains_category.trim(),
       armyCategory: r.army_category.trim(),
       topRetailCategory: r.top_retail_category.trim(),
@@ -144,15 +165,20 @@ export function listCompetitions(db: Database.Database): CompetitionSummary[] {
   if (compRows.length === 0) return [];
 
   const batchId = getActiveBatchId(db);
-  const activeItemNameMap = new Map<string, string>();
+  const activeItemMetaMap = new Map<string, { itemName: string; classificationA: string; classAType: ClassAType }>();
   if (batchId) {
     const itemRows = db
-      .prepare(`SELECT item_code, item_name FROM items WHERE batch_id = ?`)
-      .all(batchId) as Array<{ item_code: string; item_name: string }>;
+      .prepare(`SELECT item_code, item_name, COALESCE(category_name, '') AS category_name FROM items WHERE batch_id = ?`)
+      .all(batchId) as Array<{ item_code: string; item_name: string; category_name: string }>;
     for (const ir of itemRows) {
       const code = normalizeCode(ir.item_code);
-      if (code && ir.item_name) {
-        activeItemNameMap.set(code, ir.item_name.trim());
+      if (code && !activeItemMetaMap.has(code)) {
+        const classA = ir.category_name.trim();
+        activeItemMetaMap.set(code, {
+          itemName: (ir.item_name || code).trim(),
+          classificationA: classA,
+          classAType: classifyClassA(classA),
+        });
       }
     }
   }
@@ -174,10 +200,13 @@ export function listCompetitions(db: Database.Database): CompetitionSummary[] {
   for (const it of allItems) {
     const list = itemsByComp.get(it.competition_id) ?? [];
     const code = normalizeCode(it.item_code);
+    const meta = activeItemMetaMap.get(code);
     list.push({
       itemCode: code,
-      itemName: activeItemNameMap.get(code) || it.item_name || code,
+      itemName: meta?.itemName || it.item_name || code,
       equivalentFactor: Number(it.equivalent_factor),
+      classificationA: meta?.classificationA ?? '',
+      classAType: meta?.classAType ?? 'other',
     });
     itemsByComp.set(it.competition_id, list);
   }
@@ -300,10 +329,17 @@ export function deleteCompetition(db: Database.Database, competitionId: number):
   }
 }
 
+export interface CompetitionTargetInput {
+  participantKey: string;
+  targetQty?: number;
+  industrialTargetQty?: number;
+  commercialTargetQty?: number;
+}
+
 export function saveCompetitionTargets(
   db: Database.Database,
   competitionId: number,
-  targets: Array<{ participantKey: string; targetQty: number }>,
+  targets: CompetitionTargetInput[],
   user?: UserProfile
 ): void {
   const exists = db.prepare(`SELECT id FROM competitions WHERE id = ?`).get(competitionId);
@@ -335,19 +371,41 @@ export function saveCompetitionTargets(
   const now = new Date().toISOString();
   const tx = db.transaction(() => {
     const upsertStmt = db.prepare(
-      `INSERT INTO competition_targets (competition_id, participant_key, target_qty)
-       VALUES (?, ?, ?)
+      `INSERT INTO competition_targets (
+         competition_id, participant_key, target_qty, industrial_target_qty, commercial_target_qty
+       )
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(competition_id, participant_key)
-       DO UPDATE SET target_qty = excluded.target_qty`
+       DO UPDATE SET
+         target_qty = excluded.target_qty,
+         industrial_target_qty = excluded.industrial_target_qty,
+         commercial_target_qty = excluded.commercial_target_qty`
     );
     for (const row of targets) {
       const key = String(row.participantKey || '').trim();
       if (!key) continue;
-      const qty = Number(row.targetQty ?? 0);
-      if (!Number.isFinite(qty) || qty < 0) {
-        throw new Error(`قيمة الهدف الكمي غير صالحة للمشارك ${key}`);
+
+      const hasSplit = row.industrialTargetQty !== undefined || row.commercialTargetQty !== undefined;
+      if (hasSplit) {
+        const indQty = Number(row.industrialTargetQty ?? 0);
+        const comQty = Number(row.commercialTargetQty ?? 0);
+        if (!Number.isFinite(indQty) || indQty < 0) {
+          throw new Error(`قيمة هدف أصناف الصناعى غير صالحة للمشارك ${key}`);
+        }
+        if (!Number.isFinite(comQty) || comQty < 0) {
+          throw new Error(`قيمة هدف الأصناف التجارى غير صالحة للمشارك ${key}`);
+        }
+        const cleanInd = roundQty(indQty);
+        const cleanCom = roundQty(comQty);
+        const total = roundQty(cleanInd + cleanCom);
+        upsertStmt.run(competitionId, key, total, cleanInd, cleanCom);
+      } else {
+        const qty = Number(row.targetQty ?? 0);
+        if (!Number.isFinite(qty) || qty < 0) {
+          throw new Error(`قيمة الهدف الكمي غير صالحة للمشارك ${key}`);
+        }
+        upsertStmt.run(competitionId, key, roundQty(qty), 0, 0);
       }
-      upsertStmt.run(competitionId, key, qty);
     }
     db.prepare(`UPDATE competitions SET updated_at = ? WHERE id = ?`).run(now, competitionId);
   });
@@ -358,6 +416,28 @@ export interface CompetitionFilterParams {
   sector?: string;
   startDate?: string;
   endDate?: string;
+}
+
+interface SplitBucket {
+  ind: number;
+  com: number;
+  total: number;
+}
+
+const ZERO_SPLIT: SplitBucket = { ind: 0, com: 0, total: 0 };
+
+function addSplitBucket(map: Map<string, SplitBucket>, key: string, ind: number, com: number, total: number): void {
+  const b = map.get(key) ?? { ind: 0, com: 0, total: 0 };
+  b.ind += ind;
+  b.com += com;
+  b.total += total;
+  map.set(key, b);
+}
+
+interface TargetSplit {
+  ind: number;
+  com: number;
+  total: number;
 }
 
 export function getCompetitionAnalytics(
@@ -386,6 +466,12 @@ export function getCompetitionAnalytics(
         totalStandardSoldQty: 0,
         totalTargetQty: 0,
         overallAchievementPct: null,
+        totalIndustrialSoldQty: 0,
+        totalCommercialSoldQty: 0,
+        totalIndustrialTargetQty: 0,
+        totalCommercialTargetQty: 0,
+        industrialAchievementPct: null,
+        commercialAchievementPct: null,
       },
     };
   }
@@ -403,6 +489,12 @@ export function getCompetitionAnalytics(
         totalStandardSoldQty: 0,
         totalTargetQty: 0,
         overallAchievementPct: null,
+        totalIndustrialSoldQty: 0,
+        totalCommercialSoldQty: 0,
+        totalIndustrialTargetQty: 0,
+        totalCommercialTargetQty: 0,
+        industrialAchievementPct: null,
+        commercialAchievementPct: null,
       },
     };
   }
@@ -431,13 +523,60 @@ export function getCompetitionAnalytics(
     return true;
   };
 
-  // Load saved targets for this competition
+  // Load saved targets (split industrial + commercial + total)
   const targetRows = db
-    .prepare(`SELECT participant_key, target_qty FROM competition_targets WHERE competition_id = ?`)
-    .all(selectedComp.id) as Array<{ participant_key: string; target_qty: number }>;
-  const savedTargetMap = new Map<string, number>();
+    .prepare(
+      `SELECT participant_key, target_qty, COALESCE(industrial_target_qty, 0) AS industrial_target_qty, COALESCE(commercial_target_qty, 0) AS commercial_target_qty
+       FROM competition_targets
+       WHERE competition_id = ?`
+    )
+    .all(selectedComp.id) as Array<{
+    participant_key: string;
+    target_qty: number;
+    industrial_target_qty: number;
+    commercial_target_qty: number;
+  }>;
+
+  const savedTargetMap = new Map<string, TargetSplit>();
   for (const tr of targetRows) {
-    savedTargetMap.set(tr.participant_key, Number(tr.target_qty) || 0);
+    const ind = roundQty(Number(tr.industrial_target_qty || 0));
+    const com = roundQty(Number(tr.commercial_target_qty || 0));
+    const total = ind > 0 || com > 0 ? roundQty(ind + com) : roundQty(Number(tr.target_qty || 0));
+    savedTargetMap.set(tr.participant_key, { ind, com, total });
+  }
+  const getSavedTarget = (key: string, legacyKey?: string): TargetSplit => {
+    return (
+      savedTargetMap.get(key) ??
+      (legacyKey ? savedTargetMap.get(legacyKey) : undefined) ?? { ind: 0, com: 0, total: 0 }
+    );
+  };
+
+  // Load items catalog (`التصنيف A` -> category_name, `تصنيف السلاسل` -> chains_category)
+  const itemRows = db
+    .prepare(
+      `SELECT
+        item_code,
+        COALESCE(category_name, '') AS category_name,
+        COALESCE(chains_category, '') AS chains_category
+       FROM items
+       WHERE batch_id = ?`
+    )
+    .all(batchId) as Array<{ item_code: string; category_name: string; chains_category: string }>;
+
+  const itemByExact = new Map<string, { classAType: ClassAType; chainsCategory: string; normChainsCat: string }>();
+  const itemByTrimmed = new Map<string, { classAType: ClassAType; chainsCategory: string; normChainsCat: string }>();
+  for (const it of itemRows) {
+    const exact = normalizeCode(it.item_code);
+    if (!exact) continue;
+    const cleanChains = it.chains_category.replace(/\s+/g, ' ').trim();
+    const meta = {
+      classAType: classifyClassA(it.category_name),
+      chainsCategory: cleanChains,
+      normChainsCat: cleanChains ? normalizeCategoryText(cleanChains) : UNCLASSIFIED_CAT_NORM,
+    };
+    if (!itemByExact.has(exact)) itemByExact.set(exact, meta);
+    const trimmed = stripLeadingZeros(exact);
+    if (trimmed && !itemByTrimmed.has(trimmed)) itemByTrimmed.set(trimmed, meta);
   }
 
   // Load hierarchy metadata from active batch
@@ -466,16 +605,24 @@ export function getCompetitionAnalytics(
 
   const chainRows = db
     .prepare(
-      `SELECT chain_code, chain_name, sector_name, COALESCE(supervisor_name, '') AS supervisor_name
+      `SELECT chain_code, chain_name, department_name, sector_name, COALESCE(supervisor_name, '') AS supervisor_name
        FROM departments_chains
        WHERE batch_id = ?`
     )
-    .all(batchId) as Array<{ chain_code: string; chain_name: string; sector_name: string; supervisor_name: string }>;
+    .all(batchId) as Array<{
+    chain_code: string;
+    chain_name: string;
+    department_name: string;
+    sector_name: string;
+    supervisor_name: string;
+  }>;
 
   const chainByExact = new Map<string, (typeof chainRows)[number]>();
   const chainByTrimmed = new Map<string, (typeof chainRows)[number]>();
   const chainByNormName = new Map<string, (typeof chainRows)[number]>();
   const chainSupExists = new Set<string>(); // `${sec}::${supNorm}`
+  const departmentsBySector = new Map<string, Set<string>>();
+  const chainsBySector = new Map<string, Set<string>>();
 
   for (const c of chainRows) {
     const exact = normalizeCode(c.chain_code);
@@ -490,6 +637,17 @@ export function getCompetitionAnalytics(
     const supNorm = normalizeArabic(c.supervisor_name);
     if (sec && supNorm) {
       chainSupExists.add(`${sec}::${supNorm}`);
+    }
+    const deptNorm = normalizeArabic(c.department_name);
+    if (sec && deptNorm) {
+      const dSet = departmentsBySector.get(sec) ?? new Set<string>();
+      dSet.add(deptNorm);
+      departmentsBySector.set(sec, dSet);
+    }
+    if (sec && normChain) {
+      const cSet = chainsBySector.get(sec) ?? new Set<string>();
+      cSet.add(normChain);
+      chainsBySector.set(sec, cSet);
     }
   }
 
@@ -528,9 +686,20 @@ export function getCompetitionAnalytics(
     }
   }
 
+  // Load roster + assigned categories from `category_targets`
   const catTargetRoles = db
-    .prepare(`SELECT DISTINCT sector_name, job_title, employee_code, employee_name FROM category_targets WHERE batch_id = ?`)
-    .all(batchId) as Array<{ sector_name: string; job_title: string; employee_code: string; employee_name: string }>;
+    .prepare(
+      `SELECT DISTINCT sector_name, job_title, employee_code, employee_name, COALESCE(category_name, '') AS category_name
+       FROM category_targets
+       WHERE batch_id = ?`
+    )
+    .all(batchId) as Array<{
+    sector_name: string;
+    job_title: string;
+    employee_code: string;
+    employee_name: string;
+    category_name: string;
+  }>;
 
   // Build item equivalent factor lookup
   const factorByExact = new Map<string, number>();
@@ -589,9 +758,12 @@ export function getCompetitionAnalytics(
     qty: number;
   }>;
 
-  const sectorStdQtyMap = new Map<string, number>();
-  const repStdQtyMap = new Map<string, number>(); // `${sec}::${repKey}`
-  const supStdQtyMap = new Map<string, number>(); // `${sec}::${supNorm}`
+  const sectorSplitMap = new Map<string, SplitBucket>(); // sec
+  const sectorChainsCatSplitMap = new Map<string, SplitBucket>(); // `${sec}::${normChainsCat}`
+  const deptChainsCatSplitMap = new Map<string, SplitBucket>(); // `${sec}::${deptNorm}::${normChainsCat}`
+  const chainChainsCatSplitMap = new Map<string, SplitBucket>(); // `${sec}::${chainNorm}::${normChainsCat}`
+  const repSplitMap = new Map<string, SplitBucket>(); // `${sec}::${repKey}`
+  const supSplitMap = new Map<string, SplitBucket>(); // `${sec}::${supNorm}`
   const activeRepsBySector = new Map<string, Map<string, { repCode: string; repName: string }>>();
 
   for (const r of zsalesRows) {
@@ -618,12 +790,19 @@ export function getCompetitionAnalytics(
 
     if (factor === undefined) continue; // Item not in competition
     const stdQty = Number(r.qty || 0) * factor;
+    const itemMeta = rawItem
+      ? itemByExact.get(rawItem) ?? itemByTrimmed.get(stripLeadingZeros(rawItem))
+      : undefined;
+    const classAType = itemMeta?.classAType ?? 'other';
+    const indAdd = classAType === 'industrial' ? stdQty : 0;
+    const comAdd = classAType === 'commercial' ? stdQty : 0;
+    const normChainsCat = itemMeta?.normChainsCat ?? UNCLASSIFIED_CAT_NORM;
 
-    sectorStdQtyMap.set(sec, (sectorStdQtyMap.get(sec) ?? 0) + stdQty);
+    addSplitBucket(sectorSplitMap, sec, indAdd, comAdd, stdQty);
+    addSplitBucket(sectorChainsCatSplitMap, `${sec}::${normChainsCat}`, indAdd, comAdd, stdQty);
 
     if (repKey) {
-      const rk = `${sec}::${repKey}`;
-      repStdQtyMap.set(rk, (repStdQtyMap.get(rk) ?? 0) + stdQty);
+      addSplitBucket(repSplitMap, `${sec}::${repKey}`, indAdd, comAdd, stdQty);
     }
 
     const normPayer = normalizeCode(r.payer_code);
@@ -632,13 +811,20 @@ export function getCompetitionAnalytics(
       (r.chain_name ? chainByNormName.get(normalizeArabic(r.chain_name)) : undefined);
     const supNorm = normalizeArabic(chainDef?.supervisor_name || repDef?.supervisor_name || '');
     if (supNorm) {
-      const sk = `${sec}::${supNorm}`;
-      supStdQtyMap.set(sk, (supStdQtyMap.get(sk) ?? 0) + stdQty);
+      addSplitBucket(supSplitMap, `${sec}::${supNorm}`, indAdd, comAdd, stdQty);
+    }
+    const deptNorm = normalizeArabic(chainDef?.department_name || '');
+    if (deptNorm) {
+      addSplitBucket(deptChainsCatSplitMap, `${sec}::${deptNorm}::${normChainsCat}`, indAdd, comAdd, stdQty);
+    }
+    const chainNorm = normalizeArabic(chainDef?.chain_name || r.chain_name || '');
+    if (chainNorm) {
+      addSplitBucket(chainChainsCatSplitMap, `${sec}::${chainNorm}::${normChainsCat}`, indAdd, comAdd, stdQty);
     }
   }
 
   // ==================== BUILD TEAM HIERARCHY & PARTICIPANT LIST ====================
-  // Note: We compute all authorized-sector subordinates first so `مدير إدارة` auto-rollup works even when filtered by one managed sector!
+  // Note: Compute all authorized-sector subordinates first so `مدير إدارة` auto-rollup works even when filtered to one managed sector.
   const authSet = new Set(user.role === 'admin' ? ORIGINAL_SECTORS : authorizedSectors);
 
   // A. Sales Reps across all authorized sectors
@@ -647,8 +833,8 @@ export function getCompetitionAnalytics(
     employeeCode: string;
     employeeName: string;
     sectorName: string;
-    targetQty: number;
-    soldStandardQty: number;
+    target: TargetSplit;
+    sold: SplitBucket;
   }
   const allAuthReps: InternalRep[] = [];
   const repSeenBySec = new Set<string>();
@@ -663,14 +849,13 @@ export function getCompetitionAnalytics(
     repSeenBySec.add(dedupKey);
     const participantKey = `REP::${sec}::${rk}`;
     const legacyKey = `REP::${rk}`;
-    const targetQty = savedTargetMap.get(participantKey) ?? savedTargetMap.get(legacyKey) ?? 0;
     allAuthReps.push({
       participantKey,
       employeeCode: rk,
       employeeName: r.rep_name.trim() || rk,
       sectorName: sec,
-      targetQty,
-      soldStandardQty: repStdQtyMap.get(dedupKey) ?? 0,
+      target: getSavedTarget(participantKey, legacyKey),
+      sold: repSplitMap.get(dedupKey) ?? ZERO_SPLIT,
     });
   }
   for (const [sec, map] of activeRepsBySector.entries()) {
@@ -681,14 +866,13 @@ export function getCompetitionAnalytics(
       repSeenBySec.add(dedupKey);
       const participantKey = `REP::${sec}::${rk}`;
       const legacyKey = `REP::${rk}`;
-      const targetQty = savedTargetMap.get(participantKey) ?? savedTargetMap.get(legacyKey) ?? 0;
       allAuthReps.push({
         participantKey,
         employeeCode: rk,
         employeeName: info.repName,
         sectorName: sec,
-        targetQty,
-        soldStandardQty: repStdQtyMap.get(dedupKey) ?? 0,
+        target: getSavedTarget(participantKey, legacyKey),
+        sold: repSplitMap.get(dedupKey) ?? ZERO_SPLIT,
       });
     }
   }
@@ -700,8 +884,8 @@ export function getCompetitionAnalytics(
     roleLabel: string;
     sectorName: string;
     normName: string;
-    targetQty: number;
-    soldStandardQty: number;
+    target: TargetSplit;
+    sold: SplitBucket;
   }
   const supMap = new Map<string, InternalSup>();
   const registerSupervisor = (sec: string, rawName: string, roleLabel = 'مشرف قطاع') => {
@@ -711,19 +895,39 @@ export function getCompetitionAnalytics(
     const key = `${sec}::${norm}`;
     if (supMap.has(key)) return;
     const participantKey = `SUP::${sec}::${norm}`;
-    let sold = 0;
+    const sold: SplitBucket = { ind: 0, com: 0, total: 0 };
     if (chainSupExists.has(key)) {
-      sold = supStdQtyMap.get(key) ?? 0;
+      const s = supSplitMap.get(key);
+      if (s) {
+        sold.ind = s.ind;
+        sold.com = s.com;
+        sold.total = s.total;
+      }
     } else if (branchSupRepsMap.has(key)) {
       for (const rk of branchSupRepsMap.get(key)!) {
-        sold += repStdQtyMap.get(`${sec}::${rk}`) ?? 0;
+        const rs = repSplitMap.get(`${sec}::${rk}`);
+        if (rs) {
+          sold.ind += rs.ind;
+          sold.com += rs.com;
+          sold.total += rs.total;
+        }
       }
     } else if (repSupRepsMap.has(key)) {
       for (const rk of repSupRepsMap.get(key)!) {
-        sold += repStdQtyMap.get(`${sec}::${rk}`) ?? 0;
+        const rs = repSplitMap.get(`${sec}::${rk}`);
+        if (rs) {
+          sold.ind += rs.ind;
+          sold.com += rs.com;
+          sold.total += rs.total;
+        }
       }
     } else {
-      sold = supStdQtyMap.get(key) ?? 0;
+      const s = supSplitMap.get(key);
+      if (s) {
+        sold.ind = s.ind;
+        sold.com = s.com;
+        sold.total = s.total;
+      }
     }
     supMap.set(key, {
       participantKey,
@@ -731,8 +935,8 @@ export function getCompetitionAnalytics(
       roleLabel,
       sectorName: sec,
       normName: norm,
-      targetQty: savedTargetMap.get(participantKey) ?? 0,
-      soldStandardQty: sold,
+      target: getSavedTarget(participantKey),
+      sold,
     });
   };
 
@@ -752,14 +956,18 @@ export function getCompetitionAnalytics(
   }
 
   // C. Sector Managers (`مدير قطاع`) across all authorized sectors
+  //    In `التوريد المباشر` and `التوريد المركزي`: scoped STRICTLY to their assigned categories from `category_targets` (matched via `chains_category`),
+  //    whereas `الجيش` and `التوب ريتيل` reflect their entire sector.
   interface InternalSecMgr {
     participantKey: string;
     employeeCode: string;
     employeeName: string;
+    normName: string;
     roleLabel: string;
     sectorName: string;
-    targetQty: number;
-    soldStandardQty: number;
+    assignedCats: Map<string, string>; // normCat -> displayCat
+    target: TargetSplit;
+    sold: SplitBucket;
   }
   const secMgrMap = new Map<string, InternalSecMgr>();
   for (const ct of catTargetRoles) {
@@ -770,38 +978,107 @@ export function getCompetitionAnalytics(
     const normEmp = normalizeArabic(empName);
     if (!sec || !normEmp || !authSet.has(sec)) continue;
     const dedup = `${sec}::${normEmp}`;
-    if (secMgrMap.has(dedup)) continue;
-    const participantKey = `SEC_MGR::${sec}::${normEmp}`;
-    secMgrMap.set(dedup, {
-      participantKey,
-      employeeCode: normalizeCode(ct.employee_code),
-      employeeName: empName,
-      roleLabel: ct.job_title.trim() || 'مدير قطاع',
-      sectorName: sec,
-      targetQty: savedTargetMap.get(participantKey) ?? 0,
-      soldStandardQty: sectorStdQtyMap.get(sec) ?? 0,
-    });
+    let mgr = secMgrMap.get(dedup);
+    if (!mgr) {
+      const participantKey = `SEC_MGR::${sec}::${normEmp}`;
+      mgr = {
+        participantKey,
+        employeeCode: normalizeCode(ct.employee_code),
+        employeeName: empName,
+        normName: normEmp,
+        roleLabel: ct.job_title.trim() || 'مدير قطاع',
+        sectorName: sec,
+        assignedCats: new Map<string, string>(),
+        target: getSavedTarget(participantKey),
+        sold: { ind: 0, com: 0, total: 0 },
+      };
+      secMgrMap.set(dedup, mgr);
+    }
+    const rawCat = ct.category_name.replace(/\s+/g, ' ').trim();
+    const normCat = normalizeCategoryText(rawCat);
+    if (rawCat && normCat && !mgr.assignedCats.has(normCat)) {
+      mgr.assignedCats.set(normCat, rawCat);
+    }
+  }
+
+  // Track category assignee multiplicity within each (sector, jobTitle) for Direct & Central Supply
+  const secMgrCatAssigneeCount = new Map<string, number>();
+  for (const mgr of secMgrMap.values()) {
+    if (!isCategoryScopedSectorManagerSector(mgr.sectorName)) continue;
+    const roleNorm = normalizeArabic(mgr.roleLabel);
+    for (const normCat of mgr.assignedCats.keys()) {
+      const k = `${mgr.sectorName}::${roleNorm}::${normCat}`;
+      secMgrCatAssigneeCount.set(k, (secMgrCatAssigneeCount.get(k) ?? 0) + 1);
+    }
+  }
+
+  for (const mgr of secMgrMap.values()) {
+    if (isCategoryScopedSectorManagerSector(mgr.sectorName) && mgr.assignedCats.size > 0) {
+      const roleNorm = normalizeArabic(mgr.roleLabel);
+      const sum: SplitBucket = { ind: 0, com: 0, total: 0 };
+      for (const normCat of mgr.assignedCats.keys()) {
+        const assigneeCount = secMgrCatAssigneeCount.get(`${mgr.sectorName}::${roleNorm}::${normCat}`) ?? 0;
+        let bucket: SplitBucket | undefined;
+        if (assigneeCount > 1 && departmentsBySector.get(mgr.sectorName)?.has(mgr.normName)) {
+          bucket = deptChainsCatSplitMap.get(`${mgr.sectorName}::${mgr.normName}::${normCat}`);
+        } else if (assigneeCount > 1 && chainsBySector.get(mgr.sectorName)?.has(mgr.normName)) {
+          bucket = chainChainsCatSplitMap.get(`${mgr.sectorName}::${mgr.normName}::${normCat}`);
+        } else {
+          bucket = sectorChainsCatSplitMap.get(`${mgr.sectorName}::${normCat}`);
+        }
+        if (bucket) {
+          sum.ind += bucket.ind;
+          sum.com += bucket.com;
+          sum.total += bucket.total;
+        }
+      }
+      mgr.sold = sum;
+    } else {
+      mgr.sold = sectorSplitMap.get(mgr.sectorName) ?? ZERO_SPLIT;
+    }
   }
 
   // Per-sector target totals by hierarchy level (used by `مدير إدارة` auto-rollup)
-  const sectorRollupTarget = (sec: string): number => {
-    let secMgrSum = 0;
+  const sectorRollupTarget = (sec: string): TargetSplit => {
+    let secMgrInd = 0;
+    let secMgrCom = 0;
+    let secMgrTotal = 0;
     for (const sm of secMgrMap.values()) {
-      if (sm.sectorName === sec) secMgrSum += sm.targetQty;
+      if (sm.sectorName === sec) {
+        secMgrInd += sm.target.ind;
+        secMgrCom += sm.target.com;
+        secMgrTotal += sm.target.total;
+      }
     }
-    if (secMgrSum > 0) return secMgrSum;
+    if (secMgrTotal > 0 || secMgrInd > 0 || secMgrCom > 0) {
+      return { ind: secMgrInd, com: secMgrCom, total: secMgrTotal };
+    }
 
-    let supSum = 0;
+    let supInd = 0;
+    let supCom = 0;
+    let supTotal = 0;
     for (const sp of supMap.values()) {
-      if (sp.sectorName === sec) supSum += sp.targetQty;
+      if (sp.sectorName === sec) {
+        supInd += sp.target.ind;
+        supCom += sp.target.com;
+        supTotal += sp.target.total;
+      }
     }
-    if (supSum > 0) return supSum;
+    if (supTotal > 0 || supInd > 0 || supCom > 0) {
+      return { ind: supInd, com: supCom, total: supTotal };
+    }
 
-    let repSum = 0;
+    let repInd = 0;
+    let repCom = 0;
+    let repTotal = 0;
     for (const rp of allAuthReps) {
-      if (rp.sectorName === sec) repSum += rp.targetQty;
+      if (rp.sectorName === sec) {
+        repInd += rp.target.ind;
+        repCom += rp.target.com;
+        repTotal += rp.target.total;
+      }
     }
-    return repSum;
+    return { ind: repInd, com: repCom, total: repTotal };
   };
 
   // D. Department Managers (`مدير إدارة`)
@@ -811,8 +1088,8 @@ export function getCompetitionAnalytics(
     employeeName: string;
     roleLabel: string;
     managedSectors: string[];
-    targetQty: number;
-    soldStandardQty: number;
+    target: TargetSplit;
+    sold: SplitBucket;
   }
   const deptMgrMap = new Map<string, InternalDeptMgr>();
 
@@ -826,11 +1103,20 @@ export function getCompetitionAnalytics(
     const managedSectors = allManagedSectors.filter((s) => authSet.has(s));
     if (managedSectors.length === 0) return;
 
-    let targetQty = 0;
-    let soldStandardQty = 0;
+    const target: TargetSplit = { ind: 0, com: 0, total: 0 };
+    const sold: SplitBucket = { ind: 0, com: 0, total: 0 };
     for (const sec of managedSectors) {
-      targetQty += sectorRollupTarget(sec);
-      soldStandardQty += sectorStdQtyMap.get(sec) ?? 0;
+      const rt = sectorRollupTarget(sec);
+      target.ind += rt.ind;
+      target.com += rt.com;
+      target.total += rt.total;
+
+      const ss = sectorSplitMap.get(sec);
+      if (ss) {
+        sold.ind += ss.ind;
+        sold.com += ss.com;
+        sold.total += ss.total;
+      }
     }
 
     deptMgrMap.set(noSpace, {
@@ -839,8 +1125,8 @@ export function getCompetitionAnalytics(
       employeeName: cleanName,
       roleLabel: roleLabel || 'مدير إدارة',
       managedSectors,
-      targetQty,
-      soldStandardQty,
+      target,
+      sold,
     });
   };
 
@@ -853,7 +1139,7 @@ export function getCompetitionAnalytics(
   if (deptMgrMap.size === 0) {
     const sectorsPresent = new Set<string>([
       ...allAuthReps.map((r) => r.sectorName),
-      ...Array.from(sectorStdQtyMap.keys()),
+      ...Array.from(sectorSplitMap.keys()),
     ]);
     if (sectorsPresent.has('التوريد المركزي')) {
       registerDeptMgr('رافت محمد', '', 'مدير إدارة', 'التوريد المركزي');
@@ -866,29 +1152,47 @@ export function getCompetitionAnalytics(
   // ==================== ASSEMBLE FILTERED PARTICIPANTS ====================
   const participants: CompetitionParticipantRow[] = [];
 
-  const toRow = (
-    base: {
-      participantKey: string;
-      employeeCode: string;
-      employeeName: string;
-      roleLabel: string;
-      roleKind: CompetitionParticipantRow['roleKind'];
-      sectorName: string;
-      managedSectors: string[];
-      isAutoTarget: boolean;
-      targetQty: number;
-      soldStandardQty: number;
-    }
-  ): CompetitionParticipantRow => {
-    const sold = roundQty(base.soldStandardQty);
-    const target = roundQty(base.targetQty);
-    const remaining = target > 0 ? Math.max(0, roundQty(target - sold)) : 0;
+  const toRow = (base: {
+    participantKey: string;
+    employeeCode: string;
+    employeeName: string;
+    roleLabel: string;
+    roleKind: CompetitionParticipantRow['roleKind'];
+    sectorName: string;
+    managedSectors: string[];
+    assignedCategories: string[];
+    isAutoTarget: boolean;
+    target: TargetSplit;
+    sold: SplitBucket;
+  }): CompetitionParticipantRow => {
+    const indSold = roundQty(base.sold.ind);
+    const comSold = roundQty(base.sold.com);
+    const totalSold = roundQty(base.sold.total);
+    const indTarget = roundQty(base.target.ind);
+    const comTarget = roundQty(base.target.com);
+    const totalTarget = roundQty(base.target.total);
+    const remaining = totalTarget > 0 ? Math.max(0, roundQty(totalTarget - totalSold)) : 0;
+
     return {
-      ...base,
-      targetQty: target,
-      soldStandardQty: sold,
+      participantKey: base.participantKey,
+      employeeCode: base.employeeCode,
+      employeeName: base.employeeName,
+      roleLabel: base.roleLabel,
+      roleKind: base.roleKind,
+      sectorName: base.sectorName,
+      managedSectors: base.managedSectors,
+      assignedCategories: base.assignedCategories,
+      isAutoTarget: base.isAutoTarget,
+      targetQty: totalTarget,
+      soldStandardQty: totalSold,
       remainingQty: remaining,
-      achievementPct: calculateQtyAchievementPct(sold, target),
+      achievementPct: calculateQtyAchievementPct(totalSold, totalTarget),
+      industrialSoldQty: indSold,
+      commercialSoldQty: comSold,
+      industrialTargetQty: indTarget,
+      commercialTargetQty: comTarget,
+      industrialAchievementPct: calculateQtyAchievementPct(indSold, indTarget),
+      commercialAchievementPct: calculateQtyAchievementPct(comSold, comTarget),
     };
   };
 
@@ -907,9 +1211,10 @@ export function getCompetitionAnalytics(
         roleKind: 'department_manager',
         sectorName: dm.managedSectors.join(' + '),
         managedSectors: dm.managedSectors,
+        assignedCategories: [],
         isAutoTarget: true,
-        targetQty: dm.targetQty,
-        soldStandardQty: dm.soldStandardQty,
+        target: dm.target,
+        sold: dm.sold,
       })
     );
   }
@@ -925,9 +1230,12 @@ export function getCompetitionAnalytics(
         roleKind: 'sector_manager',
         sectorName: sm.sectorName,
         managedSectors: [sm.sectorName],
+        assignedCategories: isCategoryScopedSectorManagerSector(sm.sectorName)
+          ? Array.from(sm.assignedCats.values())
+          : [],
         isAutoTarget: false,
-        targetQty: sm.targetQty,
-        soldStandardQty: sm.soldStandardQty,
+        target: sm.target,
+        sold: sm.sold,
       })
     );
   }
@@ -943,9 +1251,10 @@ export function getCompetitionAnalytics(
         roleKind: 'supervisor',
         sectorName: sp.sectorName,
         managedSectors: [sp.sectorName],
+        assignedCategories: [],
         isAutoTarget: false,
-        targetQty: sp.targetQty,
-        soldStandardQty: sp.soldStandardQty,
+        target: sp.target,
+        sold: sp.sold,
       })
     );
   }
@@ -961,9 +1270,10 @@ export function getCompetitionAnalytics(
         roleKind: 'sales_rep',
         sectorName: rp.sectorName,
         managedSectors: [rp.sectorName],
+        assignedCategories: [],
         isAutoTarget: false,
-        targetQty: rp.targetQty,
-        soldStandardQty: rp.soldStandardQty,
+        target: rp.target,
+        sold: rp.sold,
       })
     );
   }
@@ -985,13 +1295,31 @@ export function getCompetitionAnalytics(
 
   // Non-overlapping summary across visible sectors
   let totalStandardSoldQty = 0;
+  let totalIndustrialSoldQty = 0;
+  let totalCommercialSoldQty = 0;
   let totalTargetQty = 0;
+  let totalIndustrialTargetQty = 0;
+  let totalCommercialTargetQty = 0;
+
   for (const sec of visibleSectors) {
-    totalStandardSoldQty += sectorStdQtyMap.get(sec) ?? 0;
-    totalTargetQty += sectorRollupTarget(sec);
+    const ss = sectorSplitMap.get(sec);
+    if (ss) {
+      totalStandardSoldQty += ss.total;
+      totalIndustrialSoldQty += ss.ind;
+      totalCommercialSoldQty += ss.com;
+    }
+    const rt = sectorRollupTarget(sec);
+    totalTargetQty += rt.total;
+    totalIndustrialTargetQty += rt.ind;
+    totalCommercialTargetQty += rt.com;
   }
+
   const roundedSoldTotal = roundQty(totalStandardSoldQty);
+  const roundedIndSoldTotal = roundQty(totalIndustrialSoldQty);
+  const roundedComSoldTotal = roundQty(totalCommercialSoldQty);
   const roundedTargetTotal = roundQty(totalTargetQty);
+  const roundedIndTargetTotal = roundQty(totalIndustrialTargetQty);
+  const roundedComTargetTotal = roundQty(totalCommercialTargetQty);
 
   return {
     competition: selectedComp,
@@ -1004,6 +1332,12 @@ export function getCompetitionAnalytics(
       totalStandardSoldQty: roundedSoldTotal,
       totalTargetQty: roundedTargetTotal,
       overallAchievementPct: calculateQtyAchievementPct(roundedSoldTotal, roundedTargetTotal),
+      totalIndustrialSoldQty: roundedIndSoldTotal,
+      totalCommercialSoldQty: roundedComSoldTotal,
+      totalIndustrialTargetQty: roundedIndTargetTotal,
+      totalCommercialTargetQty: roundedComTargetTotal,
+      industrialAchievementPct: calculateQtyAchievementPct(roundedIndSoldTotal, roundedIndTargetTotal),
+      commercialAchievementPct: calculateQtyAchievementPct(roundedComSoldTotal, roundedComTargetTotal),
     },
   };
 }

@@ -13,6 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import type {
+  ClassAType,
   CompetitionAnalyticsResponse,
   CompetitionCatalogItem,
   CompetitionItemConfig,
@@ -45,7 +46,23 @@ interface CompetitionsViewProps {
 }
 
 type RoleFilter = 'ALL' | CompetitionParticipantRow['roleKind'];
-type SortKey = 'default' | 'targetQty' | 'soldStandardQty' | 'remainingQty' | 'achievementPct';
+type SortKey =
+  | 'default'
+  | 'industrialSoldQty'
+  | 'commercialSoldQty'
+  | 'industrialTargetQty'
+  | 'commercialTargetQty'
+  | 'industrialAchievementPct'
+  | 'commercialAchievementPct';
+
+interface TargetSplitDraft {
+  ind: string;
+  com: string;
+}
+
+const EMPTY_COMPETITIONS: CompetitionAnalyticsResponse['competitions'] = [];
+const EMPTY_CATALOG_ITEMS: CompetitionCatalogItem[] = [];
+const EMPTY_PARTICIPANTS: CompetitionParticipantRow[] = [];
 
 function formatQty(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—';
@@ -68,22 +85,62 @@ function roundQty(val: number): number {
   return Number(val.toFixed(3));
 }
 
-function computeSectorRollupFromList(
-  rows: Array<{ roleKind: CompetitionParticipantRow['roleKind']; sectorName: string; targetQty: number }>,
+function safeAchievementPct(sold: number, target: number): number | null {
+  if (!Number.isFinite(sold) || !Number.isFinite(target) || target <= 0) return null;
+  const pct = (sold / target) * 100;
+  if (!Number.isFinite(pct)) return null;
+  return Number(pct.toFixed(2));
+}
+
+function formatClassALabel(classAType?: ClassAType, raw?: string): string {
+  if (classAType === 'industrial') return 'صناعى';
+  if (classAType === 'commercial') return 'تجارى';
+  return raw?.trim() || '—';
+}
+
+function computeSectorRollupSplitFromList(
+  rows: Array<{
+    roleKind: CompetitionParticipantRow['roleKind'];
+    sectorName: string;
+    industrialTargetQty: number;
+    commercialTargetQty: number;
+  }>,
   sector: string
-): number {
-  let secMgr = 0;
-  let sup = 0;
-  let rep = 0;
+): { ind: number; com: number; total: number } {
+  let secMgrInd = 0;
+  let secMgrCom = 0;
+  let supInd = 0;
+  let supCom = 0;
+  let repInd = 0;
+  let repCom = 0;
+
   for (const r of rows) {
     if (r.sectorName !== sector) continue;
-    if (r.roleKind === 'sector_manager') secMgr += r.targetQty;
-    else if (r.roleKind === 'supervisor') sup += r.targetQty;
-    else if (r.roleKind === 'sales_rep') rep += r.targetQty;
+    if (r.roleKind === 'sector_manager') {
+      secMgrInd += r.industrialTargetQty;
+      secMgrCom += r.commercialTargetQty;
+    } else if (r.roleKind === 'supervisor') {
+      supInd += r.industrialTargetQty;
+      supCom += r.commercialTargetQty;
+    } else if (r.roleKind === 'sales_rep') {
+      repInd += r.industrialTargetQty;
+      repCom += r.commercialTargetQty;
+    }
   }
-  if (secMgr > 0) return roundQty(secMgr);
-  if (sup > 0) return roundQty(sup);
-  return roundQty(rep);
+
+  if (secMgrInd > 0 || secMgrCom > 0) {
+    const ind = roundQty(secMgrInd);
+    const com = roundQty(secMgrCom);
+    return { ind, com, total: roundQty(ind + com) };
+  }
+  if (supInd > 0 || supCom > 0) {
+    const ind = roundQty(supInd);
+    const com = roundQty(supCom);
+    return { ind, com, total: roundQty(ind + com) };
+  }
+  const ind = roundQty(repInd);
+  const com = roundQty(repCom);
+  return { ind, com, total: roundQty(ind + com) };
 }
 
 export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
@@ -95,14 +152,13 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
   selectedSector,
   startDate,
   endDate,
-  selectedCompetitionId,
   onSelectCompetition,
   onRefresh,
 }) => {
   const competition = data?.competition ?? null;
-  const competitions = data?.competitions ?? [];
-  const catalogItems = data?.catalogItems ?? [];
-  const participants = data?.participants ?? [];
+  const competitions = data?.competitions ?? EMPTY_COMPETITIONS;
+  const catalogItems = data?.catalogItems ?? EMPTY_CATALOG_ITEMS;
+  const participants = data?.participants ?? EMPTY_PARTICIPANTS;
 
   // Competition create/rename/delete UI state
   const [creatingNew, setCreatingNew] = useState(false);
@@ -121,8 +177,8 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
   >([]);
   const [itemsDirty, setItemsDirty] = useState(false);
 
-  // Target qty drafts per participantKey
-  const [targetDrafts, setTargetDrafts] = useState<Record<string, string>>({});
+  // Dual target qty drafts per participantKey (`صناعى` & `تجارى`)
+  const [targetDrafts, setTargetDrafts] = useState<Record<string, TargetSplitDraft>>({});
   const [targetsDirty, setTargetsDirty] = useState(false);
 
   // Table filter & sort
@@ -134,10 +190,10 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
   // Sync local item drafts whenever competition changes
   useEffect(() => {
     if (!competition) {
-      setSelectedItemDrafts([]);
-      setItemsDirty(false);
-      setRenamingComp(false);
-      setConfirmDeleteId(null);
+      setSelectedItemDrafts((prev) => (prev.length === 0 ? prev : []));
+      setItemsDirty((prev) => (prev ? false : prev));
+      setRenamingComp((prev) => (prev ? false : prev));
+      setConfirmDeleteId((prev) => (prev !== null ? null : prev));
       return;
     }
     setSelectedItemDrafts(
@@ -156,16 +212,29 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
     }
   }, [competition?.id, competition?.updatedAt, isAdmin]);
 
-  // Sync local target drafts when participants load/refresh
+  // Sync local dual target drafts when participants load/refresh
   useEffect(() => {
-    const next: Record<string, string> = {};
+    const next: Record<string, TargetSplitDraft> = {};
     for (const p of participants) {
       if (!p.isAutoTarget) {
-        next[p.participantKey] = String(p.targetQty);
+        next[p.participantKey] = {
+          ind: String(p.industrialTargetQty ?? 0),
+          com: String(p.commercialTargetQty ?? 0),
+        };
       }
     }
-    setTargetDrafts(next);
-    setTargetsDirty(false);
+    setTargetDrafts((prev) => {
+      const prevKeys = Object.keys(prev);
+      const nextKeys = Object.keys(next);
+      if (
+        prevKeys.length === nextKeys.length &&
+        nextKeys.every((k) => prev[k]?.ind === next[k].ind && prev[k]?.com === next[k].com)
+      ) {
+        return prev;
+      }
+      return next;
+    });
+    setTargetsDirty((prev) => (prev ? false : prev));
   }, [competition?.id, participants]);
 
   // Catalog lookup map
@@ -181,6 +250,17 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
     () => new Set(selectedItemDrafts.map((i) => i.itemCode)),
     [selectedItemDrafts]
   );
+
+  const selectedClassACounts = useMemo(() => {
+    let industrial = 0;
+    let commercial = 0;
+    for (const it of selectedItemDrafts) {
+      const cat = catalogByCode.get(it.itemCode);
+      if (cat?.classAType === 'industrial') industrial++;
+      else if (cat?.classAType === 'commercial') commercial++;
+    }
+    return { industrial, commercial };
+  }, [selectedItemDrafts, catalogByCode]);
 
   const filteredCatalog = useMemo(() => {
     const q = itemSearch.trim().toLowerCase();
@@ -346,21 +426,37 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
 
   const handleSaveTargets = async () => {
     if (!competition) return;
-    const targetsPayload: Array<{ participantKey: string; targetQty: number }> = [];
+    const targetsPayload: Array<{
+      participantKey: string;
+      industrialTargetQty: number;
+      commercialTargetQty: number;
+    }> = [];
+
     for (const p of participants) {
       if (p.isAutoTarget) continue;
-      const raw = (targetDrafts[p.participantKey] ?? '0').trim();
-      const parsed = raw === '' ? 0 : Number(raw);
-      if (!Number.isFinite(parsed) || parsed < 0) {
+      const draft = targetDrafts[p.participantKey];
+      const rawInd = (draft?.ind ?? String(p.industrialTargetQty ?? 0)).trim();
+      const rawCom = (draft?.com ?? String(p.commercialTargetQty ?? 0)).trim();
+      const parsedInd = rawInd === '' ? 0 : Number(rawInd);
+      const parsedCom = rawCom === '' ? 0 : Number(rawCom);
+      if (!Number.isFinite(parsedInd) || parsedInd < 0) {
         setFeedback({
           type: 'error',
-          text: `قيمة الهدف الكمي غير صالحة للمشارك ${p.employeeName}`,
+          text: `قيمة هدف أصناف الصناعى غير صالحة للمشارك ${p.employeeName}`,
+        });
+        return;
+      }
+      if (!Number.isFinite(parsedCom) || parsedCom < 0) {
+        setFeedback({
+          type: 'error',
+          text: `قيمة هدف الأصناف التجارى غير صالحة للمشارك ${p.employeeName}`,
         });
         return;
       }
       targetsPayload.push({
         participantKey: p.participantKey,
-        targetQty: parsed,
+        industrialTargetQty: roundQty(parsedInd),
+        commercialTargetQty: roundQty(parsedCom),
       });
     }
 
@@ -373,7 +469,7 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
       });
       setTargetsDirty(false);
       onRefresh();
-      setFeedback({ type: 'success', text: 'تم حفظ الأهداف الكمية وتحديث إجماليات مديري الإدارات' });
+      setFeedback({ type: 'success', text: 'تم حفظ أهداف الصناعى والتجارى وتحديث إجماليات مديري الإدارات' });
     } catch (err) {
       setFeedback({ type: 'error', text: err instanceof Error ? err.message : 'تعذر حفظ الأهداف الكمية' });
     } finally {
@@ -381,58 +477,86 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
     }
   };
 
-  // Compute live participants with instant client-side recalculation for targets, remaining qty, % and مدير إدارة rollup
+  // Compute live participants with instant client-side recalculation for dual targets, %s, and مدير إدارة rollup
   const liveParticipants = useMemo(() => {
     const subRowsOld = participants.filter((p) => !p.isAutoTarget);
     const subRowsNew = subRowsOld.map((p) => {
-      const raw = targetDrafts[p.participantKey];
-      const parsed = raw === undefined ? p.targetQty : raw.trim() === '' ? 0 : Number(raw);
-      const validTarget = Number.isFinite(parsed) && parsed >= 0 ? roundQty(parsed) : p.targetQty;
+      const draft = targetDrafts[p.participantKey];
+      const rawInd = draft?.ind;
+      const rawCom = draft?.com;
+      const parsedInd = rawInd === undefined ? p.industrialTargetQty : rawInd.trim() === '' ? 0 : Number(rawInd);
+      const parsedCom = rawCom === undefined ? p.commercialTargetQty : rawCom.trim() === '' ? 0 : Number(rawCom);
+      const validInd = Number.isFinite(parsedInd) && parsedInd >= 0 ? roundQty(parsedInd) : p.industrialTargetQty;
+      const validCom = Number.isFinite(parsedCom) && parsedCom >= 0 ? roundQty(parsedCom) : p.commercialTargetQty;
       return {
         ...p,
-        liveTargetQty: validTarget,
+        liveIndTarget: validInd,
+        liveComTarget: validCom,
       };
     });
 
-    const newTargetByKey = new Map<string, number>();
+    const newSplitByKey = new Map<string, { ind: number; com: number }>();
     for (const sr of subRowsNew) {
-      newTargetByKey.set(sr.participantKey, sr.liveTargetQty);
+      newSplitByKey.set(sr.participantKey, { ind: sr.liveIndTarget, com: sr.liveComTarget });
     }
 
-    // Determine sectors present in current subordinate view so even single-sector filter deltas stay exact
     const sectorsInView = Array.from(new Set(subRowsOld.map((r) => r.sectorName).filter(Boolean)));
-    const deltaBySector = new Map<string, number>();
+    const deltaBySector = new Map<string, { ind: number; com: number }>();
     for (const sec of sectorsInView) {
-      const oldRoll = computeSectorRollupFromList(subRowsOld, sec);
-      const newRoll = computeSectorRollupFromList(
-        subRowsNew.map((r) => ({ roleKind: r.roleKind, sectorName: r.sectorName, targetQty: r.liveTargetQty })),
+      const oldRoll = computeSectorRollupSplitFromList(subRowsOld, sec);
+      const newRoll = computeSectorRollupSplitFromList(
+        subRowsNew.map((r) => ({
+          roleKind: r.roleKind,
+          sectorName: r.sectorName,
+          industrialTargetQty: r.liveIndTarget,
+          commercialTargetQty: r.liveComTarget,
+        })),
         sec
       );
-      deltaBySector.set(sec, newRoll - oldRoll);
+      deltaBySector.set(sec, {
+        ind: newRoll.ind - oldRoll.ind,
+        com: newRoll.com - oldRoll.com,
+      });
     }
 
     return participants.map((p) => {
-      let targetQty = p.targetQty;
+      let industrialTargetQty = p.industrialTargetQty;
+      let commercialTargetQty = p.commercialTargetQty;
       if (p.isAutoTarget) {
-        let delta = 0;
+        let deltaInd = 0;
+        let deltaCom = 0;
         for (const sec of p.managedSectors) {
-          delta += deltaBySector.get(sec) ?? 0;
+          const d = deltaBySector.get(sec);
+          if (d) {
+            deltaInd += d.ind;
+            deltaCom += d.com;
+          }
         }
-        targetQty = Math.max(0, roundQty(p.targetQty + delta));
+        industrialTargetQty = Math.max(0, roundQty(p.industrialTargetQty + deltaInd));
+        commercialTargetQty = Math.max(0, roundQty(p.commercialTargetQty + deltaCom));
       } else {
-        targetQty = newTargetByKey.get(p.participantKey) ?? p.targetQty;
+        const split = newSplitByKey.get(p.participantKey);
+        if (split) {
+          industrialTargetQty = split.ind;
+          commercialTargetQty = split.com;
+        }
       }
+
+      const targetQty =
+        industrialTargetQty > 0 || commercialTargetQty > 0
+          ? roundQty(industrialTargetQty + commercialTargetQty)
+          : p.targetQty;
       const remainingQty = targetQty > 0 ? Math.max(0, roundQty(targetQty - p.soldStandardQty)) : 0;
-      const pct =
-        targetQty > 0 && Number.isFinite(p.soldStandardQty / targetQty)
-          ? Number(((p.soldStandardQty / targetQty) * 100).toFixed(2))
-          : null;
 
       return {
         ...p,
+        industrialTargetQty,
+        commercialTargetQty,
         targetQty,
         remainingQty,
-        achievementPct: pct,
+        achievementPct: safeAchievementPct(p.soldStandardQty, targetQty),
+        industrialAchievementPct: safeAchievementPct(p.industrialSoldQty, industrialTargetQty),
+        commercialAchievementPct: safeAchievementPct(p.commercialSoldQty, commercialTargetQty),
       };
     });
   }, [participants, targetDrafts]);
@@ -441,23 +565,40 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
   const liveSummary = useMemo(() => {
     const subRows = liveParticipants.filter((p) => !p.isAutoTarget);
     const sectors = Array.from(new Set(subRows.map((p) => p.sectorName).filter(Boolean)));
-    let totalTargetQty = 0;
+    let totalIndTarget = 0;
+    let totalComTarget = 0;
     for (const sec of sectors) {
-      totalTargetQty += computeSectorRollupFromList(subRows, sec);
+      const r = computeSectorRollupSplitFromList(subRows, sec);
+      totalIndTarget += r.ind;
+      totalComTarget += r.com;
     }
-    const roundedTarget = roundQty(totalTargetQty);
+    const roundedIndTarget = roundQty(totalIndTarget);
+    const roundedComTarget = roundQty(totalComTarget);
+    const roundedTarget = roundQty(roundedIndTarget + roundedComTarget);
+
+    const indSoldTotal = data?.summary.totalIndustrialSoldQty ?? 0;
+    const comSoldTotal = data?.summary.totalCommercialSoldQty ?? 0;
     const soldTotal = data?.summary.totalStandardSoldQty ?? 0;
-    const pct =
-      roundedTarget > 0 && Number.isFinite(soldTotal / roundedTarget)
-        ? Number(((soldTotal / roundedTarget) * 100).toFixed(2))
-        : null;
+
     return {
       totalSelectedItems: selectedItemDrafts.length,
+      totalIndustrialSoldQty: indSoldTotal,
+      totalCommercialSoldQty: comSoldTotal,
       totalStandardSoldQty: soldTotal,
+      totalIndustrialTargetQty: roundedIndTarget,
+      totalCommercialTargetQty: roundedComTarget,
       totalTargetQty: roundedTarget,
-      overallAchievementPct: pct,
+      industrialAchievementPct: safeAchievementPct(indSoldTotal, roundedIndTarget),
+      commercialAchievementPct: safeAchievementPct(comSoldTotal, roundedComTarget),
+      overallAchievementPct: safeAchievementPct(soldTotal, roundedTarget),
     };
-  }, [liveParticipants, data?.summary.totalStandardSoldQty, selectedItemDrafts.length]);
+  }, [
+    liveParticipants,
+    data?.summary.totalIndustrialSoldQty,
+    data?.summary.totalCommercialSoldQty,
+    data?.summary.totalStandardSoldQty,
+    selectedItemDrafts.length,
+  ]);
 
   const filteredRows = useMemo(() => {
     const q = searchText.trim().toLowerCase();
@@ -468,16 +609,17 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
         r.employeeName.toLowerCase().includes(q) ||
         r.roleLabel.toLowerCase().includes(q) ||
         r.sectorName.toLowerCase().includes(q) ||
-        r.employeeCode.toLowerCase().includes(q)
+        r.employeeCode.toLowerCase().includes(q) ||
+        r.assignedCategories.some((c) => c.toLowerCase().includes(q))
       );
     });
 
     if (sortKey === 'default') return list;
 
     return [...list].sort((a, b) => {
-      if (sortKey === 'achievementPct') {
-        const av = a.achievementPct ?? -Infinity;
-        const bv = b.achievementPct ?? -Infinity;
+      if (sortKey === 'industrialAchievementPct' || sortKey === 'commercialAchievementPct') {
+        const av = a[sortKey] ?? -Infinity;
+        const bv = b[sortKey] ?? -Infinity;
         return sortAsc ? av - bv : bv - av;
       }
       const diff = a[sortKey] - b[sortKey];
@@ -497,67 +639,87 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
   const exportTotals = useMemo(() => {
     const distinctRoles = new Set(filteredRows.map((r) => r.roleKind));
     if (roleFilter !== 'ALL' || distinctRoles.size <= 1) {
-      let targetQty = 0;
-      let soldStandardQty = 0;
-      let remainingQty = 0;
+      let industrialSoldQty = 0;
+      let commercialSoldQty = 0;
+      let industrialTargetQty = 0;
+      let commercialTargetQty = 0;
       for (const r of filteredRows) {
-        targetQty += r.targetQty;
-        soldStandardQty += r.soldStandardQty;
-        remainingQty += r.remainingQty;
+        industrialSoldQty += r.industrialSoldQty;
+        commercialSoldQty += r.commercialSoldQty;
+        industrialTargetQty += r.industrialTargetQty;
+        commercialTargetQty += r.commercialTargetQty;
       }
-      targetQty = roundQty(targetQty);
-      soldStandardQty = roundQty(soldStandardQty);
-      remainingQty = roundQty(remainingQty);
-      const achievementPct =
-        targetQty > 0 && Number.isFinite(soldStandardQty / targetQty)
-          ? Number(((soldStandardQty / targetQty) * 100).toFixed(2))
-          : null;
-      return { targetQty, soldStandardQty, remainingQty, achievementPct, isDeduplicated: false };
+      industrialSoldQty = roundQty(industrialSoldQty);
+      commercialSoldQty = roundQty(commercialSoldQty);
+      industrialTargetQty = roundQty(industrialTargetQty);
+      commercialTargetQty = roundQty(commercialTargetQty);
+      return {
+        industrialSoldQty,
+        commercialSoldQty,
+        industrialTargetQty,
+        commercialTargetQty,
+        industrialAchievementPct: safeAchievementPct(industrialSoldQty, industrialTargetQty),
+        commercialAchievementPct: safeAchievementPct(commercialSoldQty, commercialTargetQty),
+        isDeduplicated: false,
+      };
     }
 
     if (!searchText.trim()) {
-      const targetQty = liveSummary.totalTargetQty;
-      const soldStandardQty = liveSummary.totalStandardSoldQty;
-      const remainingQty = targetQty > 0 ? Math.max(0, roundQty(targetQty - soldStandardQty)) : 0;
       return {
-        targetQty,
-        soldStandardQty,
-        remainingQty,
-        achievementPct: liveSummary.overallAchievementPct,
+        industrialSoldQty: liveSummary.totalIndustrialSoldQty,
+        commercialSoldQty: liveSummary.totalCommercialSoldQty,
+        industrialTargetQty: liveSummary.totalIndustrialTargetQty,
+        commercialTargetQty: liveSummary.totalCommercialTargetQty,
+        industrialAchievementPct: liveSummary.industrialAchievementPct,
+        commercialAchievementPct: liveSummary.commercialAchievementPct,
         isDeduplicated: true,
       };
     }
 
-    // Search narrowed rows across multiple hierarchical tiers: compute non-overlapping sector rollup + sold by lowest visible tier per sector
     const singleSectors = new Set(
       filteredRows.filter((r) => r.roleKind !== 'department_manager').map((r) => r.sectorName).filter(Boolean)
     );
-    let targetQty = 0;
-    let soldStandardQty = 0;
+    let industrialTargetQty = 0;
+    let commercialTargetQty = 0;
+    let industrialSoldQty = 0;
+    let commercialSoldQty = 0;
+
     if (singleSectors.size > 0) {
       for (const sec of singleSectors) {
-        targetQty += computeSectorRollupFromList(filteredRows, sec);
+        const roll = computeSectorRollupSplitFromList(filteredRows, sec);
+        industrialTargetQty += roll.ind;
+        commercialTargetQty += roll.com;
         const secRows = filteredRows.filter((r) => r.sectorName === sec && r.roleKind !== 'department_manager');
         const repRows = secRows.filter((r) => r.roleKind === 'sales_rep');
         const supRows = secRows.filter((r) => r.roleKind === 'supervisor');
         const secMgrRows = secRows.filter((r) => r.roleKind === 'sector_manager');
-        const tierRows = secMgrRows.length > 0 ? secMgrRows : supRows.length > 0 ? supRows : repRows;
-        for (const tr of tierRows) soldStandardQty += tr.soldStandardQty;
+        const tierRows = repRows.length > 0 ? repRows : supRows.length > 0 ? supRows : secMgrRows;
+        for (const tr of tierRows) {
+          industrialSoldQty += tr.industrialSoldQty;
+          commercialSoldQty += tr.commercialSoldQty;
+        }
       }
     } else {
       for (const r of filteredRows) {
-        targetQty += r.targetQty;
-        soldStandardQty += r.soldStandardQty;
+        industrialTargetQty += r.industrialTargetQty;
+        commercialTargetQty += r.commercialTargetQty;
+        industrialSoldQty += r.industrialSoldQty;
+        commercialSoldQty += r.commercialSoldQty;
       }
     }
-    targetQty = roundQty(targetQty);
-    soldStandardQty = roundQty(soldStandardQty);
-    const remainingQty = targetQty > 0 ? Math.max(0, roundQty(targetQty - soldStandardQty)) : 0;
-    const achievementPct =
-      targetQty > 0 && Number.isFinite(soldStandardQty / targetQty)
-        ? Number(((soldStandardQty / targetQty) * 100).toFixed(2))
-        : null;
-    return { targetQty, soldStandardQty, remainingQty, achievementPct, isDeduplicated: true };
+    industrialSoldQty = roundQty(industrialSoldQty);
+    commercialSoldQty = roundQty(commercialSoldQty);
+    industrialTargetQty = roundQty(industrialTargetQty);
+    commercialTargetQty = roundQty(commercialTargetQty);
+    return {
+      industrialSoldQty,
+      commercialSoldQty,
+      industrialTargetQty,
+      commercialTargetQty,
+      industrialAchievementPct: safeAchievementPct(industrialSoldQty, industrialTargetQty),
+      commercialAchievementPct: safeAchievementPct(commercialSoldQty, commercialTargetQty),
+      isDeduplicated: true,
+    };
   }, [filteredRows, roleFilter, searchText, liveSummary]);
 
   const getExportMeta = () => {
@@ -588,21 +750,28 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
       { header: 'المسمى الوظيفي / الدور', key: 'roleLabel', type: 'string', minWidth: 16 },
       { header: 'القطاع', key: 'sectorName', type: 'string', minWidth: 18 },
       { header: 'الكود', key: 'employeeCode', type: 'string', minWidth: 12 },
-      { header: 'الهدف الكمي', key: 'targetQty', type: 'qty', minWidth: 14 },
-      { header: 'الكمية المباعة', key: 'soldStandardQty', type: 'qty', minWidth: 14 },
-      { header: 'الكمية المتبقية', key: 'remainingQty', type: 'qty', minWidth: 14 },
-      { header: 'نسبة التحقيق', key: 'achievementPct', type: 'percent', minWidth: 13 },
+      { header: 'مبيعات أصناف الصناعى', key: 'industrialSoldQty', type: 'qty', minWidth: 16 },
+      { header: 'مبيعات الأصناف التجارى', key: 'commercialSoldQty', type: 'qty', minWidth: 16 },
+      { header: 'هدف أصناف الصناعى', key: 'industrialTargetQty', type: 'qty', minWidth: 15 },
+      { header: 'هدف أصناف التجارى', key: 'commercialTargetQty', type: 'qty', minWidth: 15 },
+      { header: 'نسبة تحقيق الصناعى', key: 'industrialAchievementPct', type: 'percent', minWidth: 15 },
+      { header: 'نسبة تحقيق التجارى', key: 'commercialAchievementPct', type: 'percent', minWidth: 15 },
     ];
 
     const exportRows = filteredRows.map((r) => ({
-      employeeName: r.employeeName,
+      employeeName:
+        r.assignedCategories.length > 0
+          ? `${r.employeeName} (${r.assignedCategories.join('، ')})`
+          : r.employeeName,
       roleLabel: r.roleLabel,
       sectorName: r.sectorName,
       employeeCode: r.employeeCode || '—',
-      targetQty: r.targetQty,
-      soldStandardQty: r.soldStandardQty,
-      remainingQty: r.remainingQty,
-      achievementPct: r.achievementPct,
+      industrialSoldQty: r.industrialSoldQty,
+      commercialSoldQty: r.commercialSoldQty,
+      industrialTargetQty: r.industrialTargetQty,
+      commercialTargetQty: r.commercialTargetQty,
+      industrialAchievementPct: r.industrialAchievementPct,
+      commercialAchievementPct: r.commercialAchievementPct,
     }));
 
     const totalRow =
@@ -614,10 +783,12 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
             roleLabel: '',
             sectorName: '',
             employeeCode: '',
-            targetQty: exportTotals.targetQty,
-            soldStandardQty: exportTotals.soldStandardQty,
-            remainingQty: exportTotals.remainingQty,
-            achievementPct: exportTotals.achievementPct,
+            industrialSoldQty: exportTotals.industrialSoldQty,
+            commercialSoldQty: exportTotals.commercialSoldQty,
+            industrialTargetQty: exportTotals.industrialTargetQty,
+            commercialTargetQty: exportTotals.commercialTargetQty,
+            industrialAchievementPct: exportTotals.industrialAchievementPct,
+            commercialAchievementPct: exportTotals.commercialAchievementPct,
           }
         : null;
 
@@ -627,7 +798,8 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
       return {
         itemCode: it.itemCode,
         itemName: it.itemName,
-        category: cat?.chainsCategory || cat?.categoryName || '—',
+        classA: formatClassALabel(cat?.classAType, cat?.categoryName),
+        category: cat?.chainsCategory || '—',
         factor: Number.isFinite(factorNum) ? factorNum : 1,
       };
     });
@@ -642,7 +814,8 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
     const itemColumns: ExportColumn[] = [
       { header: 'كود الصنف', key: 'itemCode', type: 'string', minWidth: 16 },
       { header: 'اسم الصنف', key: 'itemName', type: 'string', minWidth: 32 },
-      { header: 'التصنيف', key: 'category', type: 'string', minWidth: 20 },
+      { header: 'التصنيف A', key: 'classA', type: 'string', minWidth: 14 },
+      { header: 'تصنيف السلاسل', key: 'category', type: 'string', minWidth: 20 },
       { header: 'معامل الشدة المعيارية', key: 'factor', type: 'qty', minWidth: 20 },
     ];
 
@@ -661,9 +834,12 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
           summaryPairs: [
             { label: 'اسم المسابقة', value: competition.name, type: 'string' },
             { label: 'الأصناف المختارة بالمسابقة', value: liveSummary.totalSelectedItems, type: 'integer' },
-            { label: 'إجمالي الكمية المباعة المعيارية', value: liveSummary.totalStandardSoldQty, type: 'qty' },
-            { label: 'الهدف الكمي الإجمالي', value: liveSummary.totalTargetQty, type: 'qty' },
-            { label: 'نسبة التحقيق الإجمالية', value: liveSummary.overallAchievementPct, type: 'percent' },
+            { label: 'مبيعات أصناف الصناعى', value: liveSummary.totalIndustrialSoldQty, type: 'qty' },
+            { label: 'هدف أصناف الصناعى', value: liveSummary.totalIndustrialTargetQty, type: 'qty' },
+            { label: 'نسبة تحقيق الصناعى', value: liveSummary.industrialAchievementPct, type: 'percent' },
+            { label: 'مبيعات الأصناف التجارى', value: liveSummary.totalCommercialSoldQty, type: 'qty' },
+            { label: 'هدف أصناف التجارى', value: liveSummary.totalCommercialTargetQty, type: 'qty' },
+            { label: 'نسبة تحقيق التجارى', value: liveSummary.commercialAchievementPct, type: 'percent' },
           ],
           columns,
           rows: exportRows,
@@ -685,7 +861,11 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
     const { meta, columns, exportRows, totalRow } = getExportMeta();
     const itemStrings =
       selectedItemDrafts.length > 0
-        ? selectedItemDrafts.map((it) => `${it.itemName} (${it.itemCode}) × معامل ${it.factorStr || '1'}`)
+        ? selectedItemDrafts.map((it) => {
+            const cat = catalogByCode.get(it.itemCode);
+            const classALabel = formatClassALabel(cat?.classAType, cat?.categoryName);
+            return `${it.itemName} (${it.itemCode} · ${classALabel}) × معامل ${it.factorStr || '1'}`;
+          })
         : ['لم يتم اختيار أصناف بعد'];
 
     await exportToPdf({
@@ -697,19 +877,30 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
         {
           label: 'الأصناف المختارة بالمسابقة',
           value: formatNum(liveSummary.totalSelectedItems),
+          sublabel: `صناعى ${formatNum(selectedClassACounts.industrial)} · تجارى ${formatNum(selectedClassACounts.commercial)}`,
         },
         {
-          label: 'إجمالي الكمية المباعة المعيارية',
-          value: formatQty(liveSummary.totalStandardSoldQty),
-          sublabel: 'كرتونة معيارية (Zsales_Price)',
+          label: 'أصناف الصناعى (مبيعات / هدف)',
+          value: formatQty(liveSummary.totalIndustrialSoldQty),
+          sublabel: `الهدف: ${formatQty(liveSummary.totalIndustrialTargetQty)} · التحقيق: ${formatAchievement(liveSummary.industrialAchievementPct)}`,
+          tone:
+            liveSummary.industrialAchievementPct !== null && liveSummary.industrialAchievementPct >= 100
+              ? 'positive'
+              : 'accent',
         },
         {
-          label: 'الهدف الكمي الإجمالي',
-          value: formatQty(liveSummary.totalTargetQty),
+          label: 'الأصناف التجارى (مبيعات / هدف)',
+          value: formatQty(liveSummary.totalCommercialSoldQty),
+          sublabel: `الهدف: ${formatQty(liveSummary.totalCommercialTargetQty)} · التحقيق: ${formatAchievement(liveSummary.commercialAchievementPct)}`,
+          tone:
+            liveSummary.commercialAchievementPct !== null && liveSummary.commercialAchievementPct >= 100
+              ? 'positive'
+              : 'accent',
         },
         {
           label: 'نسبة التحقيق الإجمالية',
           value: formatAchievement(liveSummary.overallAchievementPct),
+          sublabel: `${formatQty(liveSummary.totalStandardSoldQty)} ÷ ${formatQty(liveSummary.totalTargetQty)}`,
           tone:
             liveSummary.overallAchievementPct !== null && liveSummary.overallAchievementPct >= 100
               ? 'positive'
@@ -724,7 +915,7 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
       ],
       tables: [
         {
-          title: 'جدول أداء المسابقة بالكميات',
+          title: 'جدول أداء المسابقة بالكميات (تصنيف A: صناعى / تجارى)',
           columns,
           rows: exportRows,
           totalRow,
@@ -745,7 +936,8 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
           <Info className="w-4 h-4 text-teal-700 shrink-0" />
           <span>
             تُحتسب كميات المسابقات (<span className="font-semibold font-num">QTY</span>) حصريًا من شيت{' '}
-            <span className="font-semibold">Zsales_Price (2)</span> وتُضرب تلقائيًا في معامل الشدة المعيارية المحدد لكل صنف.
+            <span className="font-semibold">Zsales_Price (2)</span> وتُضرب تلقائيًا في معامل الشدة المعيارية المحدد لكل صنف،
+            مع تقسيمها وفق <span className="font-semibold">التصنيف A (صناعى / تجارى)</span>.
           </span>
         </div>
       )}
@@ -933,7 +1125,7 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
           <Trophy className="w-8 h-8 text-slate-400 mx-auto" />
           <div className="text-sm font-bold text-slate-900">لم يتم إنشاء أي مسابقة بعد</div>
           <p className="text-xs text-slate-500 max-w-md mx-auto">
-            أنشئ مسابقة جديدة وحدد مجموعة الأصناف ومعامل الشدة المعيارية لكل صنف ثم وزّع الأهداف الكمية مباشرة على فريق المبيعات.
+            أنشئ مسابقة جديدة وحدد مجموعة الأصناف ومعامل الشدة المعيارية لكل صنف ثم وزّع أهداف الصناعى والتجارى مباشرة على فريق المبيعات.
           </p>
           {isAdmin && !creatingNew && (
             <button
@@ -954,24 +1146,40 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
               <div className="text-2xl font-bold text-slate-900 font-num tabular-nums mt-1.5" dir="ltr">
                 {formatNum(liveSummary.totalSelectedItems)}
               </div>
-              <div className="text-[11px] text-slate-500 mt-1">من تعريف الأصناف</div>
-            </div>
-
-            <div className="bg-white border border-slate-200 rounded-xl p-4">
-              <div className="text-xs font-medium text-slate-500">إجمالي الكمية المباعة المعيارية</div>
-              <div className="text-2xl font-bold text-slate-900 font-num tabular-nums mt-1.5" dir="ltr">
-                {formatQty(liveSummary.totalStandardSoldQty)}
+              <div className="text-[11px] text-slate-500 mt-1">
+                صناعى: <span className="font-num font-semibold text-slate-700">{formatNum(selectedClassACounts.industrial)}</span>
+                {' · '}
+                تجارى: <span className="font-num font-semibold text-slate-700">{formatNum(selectedClassACounts.commercial)}</span>
               </div>
-              <div className="text-[11px] text-slate-500 mt-1">كرتونة معيارية · من Zsales_Price (2)</div>
             </div>
 
             <div className="bg-white border border-slate-200 rounded-xl p-4">
-              <div className="text-xs font-medium text-slate-500">الهدف الكمي الإجمالي</div>
+              <div className="text-xs font-medium text-slate-500">مبيعات أصناف الصناعى</div>
               <div className="text-2xl font-bold text-slate-900 font-num tabular-nums mt-1.5" dir="ltr">
-                {formatQty(liveSummary.totalTargetQty)}
+                {formatQty(liveSummary.totalIndustrialSoldQty)}
               </div>
               <div className="text-[11px] text-slate-500 mt-1">
-                {selectedSector === 'ALL' ? 'إجمالي القطاعات الظاهرة' : `قطاع ${selectedSector}`}
+                الهدف: <span className="font-num font-semibold text-slate-700">{formatQty(liveSummary.totalIndustrialTargetQty)}</span>
+                {' · '}
+                التحقيق:{' '}
+                <span className="font-num font-semibold text-teal-700">
+                  {formatAchievement(liveSummary.industrialAchievementPct)}
+                </span>
+              </div>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <div className="text-xs font-medium text-slate-500">مبيعات الأصناف التجارى</div>
+              <div className="text-2xl font-bold text-slate-900 font-num tabular-nums mt-1.5" dir="ltr">
+                {formatQty(liveSummary.totalCommercialSoldQty)}
+              </div>
+              <div className="text-[11px] text-slate-500 mt-1">
+                الهدف: <span className="font-num font-semibold text-slate-700">{formatQty(liveSummary.totalCommercialTargetQty)}</span>
+                {' · '}
+                التحقيق:{' '}
+                <span className="font-num font-semibold text-teal-700">
+                  {formatAchievement(liveSummary.commercialAchievementPct)}
+                </span>
               </div>
             </div>
 
@@ -989,7 +1197,11 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
               >
                 {formatAchievement(liveSummary.overallAchievementPct)}
               </div>
-              <div className="text-[11px] text-slate-500 mt-1">الكمية المباعة المعيارية ÷ الهدف الكمي</div>
+              <div className="text-[11px] text-slate-500 mt-1">
+                المبيعات <span className="font-num font-semibold">{formatQty(liveSummary.totalStandardSoldQty)}</span>
+                {' ÷ '}
+                الهدف <span className="font-num font-semibold">{formatQty(liveSummary.totalTargetQty)}</span>
+              </div>
             </div>
           </div>
 
@@ -1020,7 +1232,7 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-12 divide-y lg:divide-y-0 lg:divide-x lg:divide-x-reverse divide-slate-200">
-                {/* Left/Right 1: Multi-select Item Picker */}
+                {/* Multi-select Item Picker */}
                 {isAdmin && (
                   <div className="lg:col-span-5 p-4 space-y-3">
                     <div className="flex items-center justify-between gap-2">
@@ -1052,7 +1264,7 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
                         type="text"
                         value={itemSearch}
                         onChange={(e) => setItemSearch(e.target.value)}
-                        placeholder="بحث سريع باسم الصنف أو الكود..."
+                        placeholder="بحث سريع باسم الصنف أو الكود أو التصنيف A..."
                         className="w-full pr-9 pl-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-600"
                       />
                     </div>
@@ -1065,8 +1277,9 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
                       ) : (
                         filteredCatalog.map((item) => {
                           const checked = selectedCodesSet.has(item.itemCode);
-                          const subParts = [item.itemCode, item.chainsCategory || item.categoryName, item.unitName]
-                            .filter(Boolean)
+                          const classALabel = formatClassALabel(item.classAType, item.categoryName);
+                          const subParts = [item.itemCode, classALabel, item.chainsCategory, item.unitName]
+                            .filter((p) => p && p !== '—')
                             .join(' · ');
                           return (
                             <label
@@ -1096,12 +1309,12 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
 
                 {/* Selected Items & Standard Strength Factor Inputs */}
                 <div className={`${isAdmin ? 'lg:col-span-7' : 'lg:col-span-12'} p-4 space-y-3`}>
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
                     <span className="text-xs font-bold text-slate-800">
                       الأصناف المختارة ({formatNum(selectedItemDrafts.length)})
                     </span>
                     <span className="text-[11px] text-slate-500">
-                      الكرتونة من هذا الصنف تساوي كام كرتونة من الشدة المعيارية؟ (يدعم حتى 3 أرقام عشرية مثل 0.333، 0.667، 1.250)
+                      الكرتونة من هذا الصنف تساوي كام كرتونة من الشدة المعيارية؟ (حتى 3 أرقام عشرية)
                     </span>
                   </div>
 
@@ -1116,6 +1329,7 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
                           <tr>
                             <th className="py-2.5 px-3 whitespace-nowrap">كود الصنف</th>
                             <th className="py-2.5 px-3">اسم الصنف</th>
+                            <th className="py-2.5 px-3 whitespace-nowrap">التصنيف A</th>
                             <th className="py-2.5 px-3 whitespace-nowrap">معامل الشدة المعيارية</th>
                             {isAdmin && <th className="py-2.5 px-3 text-center whitespace-nowrap">إزالة</th>}
                           </tr>
@@ -1123,6 +1337,7 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
                         <tbody className="divide-y divide-slate-100">
                           {selectedItemDrafts.map((item) => {
                             const cat = catalogByCode.get(item.itemCode);
+                            const classALabel = formatClassALabel(cat?.classAType, cat?.categoryName);
                             return (
                               <tr key={item.itemCode} className="hover:bg-slate-50/70">
                                 <td className="py-2 px-3 font-num text-slate-600 whitespace-nowrap" dir="ltr">
@@ -1133,6 +1348,9 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
                                   {cat?.chainsCategory && (
                                     <div className="text-[11px] text-slate-500">{cat.chainsCategory}</div>
                                   )}
+                                </td>
+                                <td className="py-2 px-3 whitespace-nowrap font-semibold text-slate-700">
+                                  {classALabel}
                                 </td>
                                 <td className="py-2 px-3 whitespace-nowrap">
                                   {isAdmin ? (
@@ -1259,37 +1477,55 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
                     <th className="py-3 px-4 whitespace-nowrap">المسمى الوظيفي / الدور</th>
                     <th className="py-3 px-4 whitespace-nowrap">
                       <button
-                        onClick={() => toggleSort('targetQty')}
+                        onClick={() => toggleSort('industrialSoldQty')}
                         className="inline-flex items-center gap-1 cursor-pointer hover:text-slate-900"
                       >
-                        <span>الهدف الكمي</span>
+                        <span>مبيعات أصناف الصناعى</span>
                         <ArrowUpDown className="w-3.5 h-3.5" />
                       </button>
                     </th>
                     <th className="py-3 px-4 whitespace-nowrap">
                       <button
-                        onClick={() => toggleSort('soldStandardQty')}
+                        onClick={() => toggleSort('commercialSoldQty')}
                         className="inline-flex items-center gap-1 cursor-pointer hover:text-slate-900"
                       >
-                        <span>الكمية المباعة</span>
+                        <span>مبيعات الأصناف التجارى</span>
                         <ArrowUpDown className="w-3.5 h-3.5" />
                       </button>
                     </th>
                     <th className="py-3 px-4 whitespace-nowrap">
                       <button
-                        onClick={() => toggleSort('remainingQty')}
+                        onClick={() => toggleSort('industrialTargetQty')}
                         className="inline-flex items-center gap-1 cursor-pointer hover:text-slate-900"
                       >
-                        <span>الكمية المتبقية</span>
+                        <span>هدف أصناف الصناعى</span>
                         <ArrowUpDown className="w-3.5 h-3.5" />
                       </button>
                     </th>
                     <th className="py-3 px-4 whitespace-nowrap">
                       <button
-                        onClick={() => toggleSort('achievementPct')}
+                        onClick={() => toggleSort('commercialTargetQty')}
                         className="inline-flex items-center gap-1 cursor-pointer hover:text-slate-900"
                       >
-                        <span>نسبة التحقيق</span>
+                        <span>هدف أصناف التجارى</span>
+                        <ArrowUpDown className="w-3.5 h-3.5" />
+                      </button>
+                    </th>
+                    <th className="py-3 px-4 whitespace-nowrap">
+                      <button
+                        onClick={() => toggleSort('industrialAchievementPct')}
+                        className="inline-flex items-center gap-1 cursor-pointer hover:text-slate-900"
+                      >
+                        <span>نسبة تحقيق الصناعى</span>
+                        <ArrowUpDown className="w-3.5 h-3.5" />
+                      </button>
+                    </th>
+                    <th className="py-3 px-4 whitespace-nowrap">
+                      <button
+                        onClick={() => toggleSort('commercialAchievementPct')}
+                        className="inline-flex items-center gap-1 cursor-pointer hover:text-slate-900"
+                      >
+                        <span>نسبة تحقيق التجارى</span>
                         <ArrowUpDown className="w-3.5 h-3.5" />
                       </button>
                     </th>
@@ -1298,87 +1534,154 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
                 <tbody className="divide-y divide-slate-100">
                   {filteredRows.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="py-10 text-center text-xs text-slate-500">
+                      <td colSpan={8} className="py-10 text-center text-xs text-slate-500">
                         لا توجد نتائج مطابقة للفلاتر المحددة
                       </td>
                     </tr>
                   ) : (
-                    filteredRows.map((r) => (
-                      <tr
-                        key={r.participantKey}
-                        className={r.roleKind === 'department_manager' ? 'bg-slate-50/70 hover:bg-slate-100/70' : 'hover:bg-slate-50/70'}
-                      >
-                        <td className="py-2.5 px-4 whitespace-nowrap">
-                          <div className="font-semibold text-slate-900">{r.employeeName}</div>
-                          <div className="text-[11px] text-slate-500 mt-0.5">
-                            {r.sectorName}
-                            {r.employeeCode ? ` · ${r.employeeCode}` : ''}
-                          </div>
-                        </td>
-
-                        <td className="py-2.5 px-4 whitespace-nowrap">
-                          <div className="text-xs font-semibold text-slate-800">{r.roleLabel}</div>
-                          {r.isAutoTarget && (
-                            <div className="text-[11px] text-teal-700 mt-0.5">تجميع تلقائي لأهداف النطاق</div>
-                          )}
-                        </td>
-
-                        <td className="py-2.5 px-4 whitespace-nowrap">
-                          {r.isAutoTarget || !canEditTargets ? (
-                            <span
-                              className="font-num tabular-nums font-semibold text-slate-900 inline-block"
-                              dir="ltr"
-                            >
-                              {formatQty(r.targetQty)}
-                            </span>
-                          ) : (
-                            <input
-                              type="number"
-                              step="0.001"
-                              min="0"
-                              aria-label={`الهدف الكمي لـ ${r.employeeName}`}
-                              value={targetDrafts[r.participantKey] ?? String(r.targetQty)}
-                              onChange={(e) => {
-                                setFeedback(null);
-                                setTargetsDirty(true);
-                                setTargetDrafts((prev) => ({
-                                  ...prev,
-                                  [r.participantKey]: e.target.value,
-                                }));
-                              }}
-                              className="w-28 px-2.5 py-1.5 text-xs font-num tabular-nums border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-600 bg-white"
-                              dir="ltr"
-                            />
-                          )}
-                        </td>
-
-                        <td
-                          className={`py-2.5 px-4 font-num tabular-nums font-semibold whitespace-nowrap ${
-                            r.soldStandardQty === 0 ? 'text-slate-500' : 'text-slate-900'
-                          }`}
-                          dir="ltr"
+                    filteredRows.map((r) => {
+                      const draft = targetDrafts[r.participantKey];
+                      return (
+                        <tr
+                          key={r.participantKey}
+                          className={
+                            r.roleKind === 'department_manager'
+                              ? 'bg-slate-50/70 hover:bg-slate-100/70'
+                              : 'hover:bg-slate-50/70'
+                          }
                         >
-                          {formatQty(r.soldStandardQty)}
-                        </td>
+                          <td className="py-2.5 px-4 whitespace-nowrap">
+                            <div className="font-semibold text-slate-900">{r.employeeName}</div>
+                            <div className="text-[11px] text-slate-500 mt-0.5">
+                              {r.sectorName}
+                              {r.employeeCode ? ` · ${r.employeeCode}` : ''}
+                            </div>
+                            {r.assignedCategories.length > 0 && (
+                              <div className="text-[11px] text-teal-800 mt-0.5 whitespace-normal max-w-[240px]">
+                                الفئات: {r.assignedCategories.join('، ')}
+                              </div>
+                            )}
+                          </td>
 
-                        <td className="py-2.5 px-4 font-num tabular-nums text-slate-700 whitespace-nowrap" dir="ltr">
-                          {formatQty(r.remainingQty)}
-                        </td>
+                          <td className="py-2.5 px-4 whitespace-nowrap">
+                            <div className="text-xs font-semibold text-slate-800">{r.roleLabel}</div>
+                            {r.isAutoTarget && (
+                              <div className="text-[11px] text-teal-700 mt-0.5">تجميع تلقائي لأهداف النطاق</div>
+                            )}
+                          </td>
 
-                        <td
-                          className={`py-2.5 px-4 font-num tabular-nums font-semibold whitespace-nowrap ${
-                            r.achievementPct === null
-                              ? 'text-slate-400'
-                              : r.achievementPct >= 100
-                                ? 'text-emerald-700'
-                                : 'text-teal-700'
-                          }`}
-                          dir="ltr"
-                        >
-                          {formatAchievement(r.achievementPct)}
-                        </td>
-                      </tr>
-                    ))
+                          <td
+                            className={`py-2.5 px-4 font-num tabular-nums font-semibold whitespace-nowrap ${
+                              r.industrialSoldQty === 0 ? 'text-slate-500' : 'text-slate-900'
+                            }`}
+                            dir="ltr"
+                          >
+                            {formatQty(r.industrialSoldQty)}
+                          </td>
+
+                          <td
+                            className={`py-2.5 px-4 font-num tabular-nums font-semibold whitespace-nowrap ${
+                              r.commercialSoldQty === 0 ? 'text-slate-500' : 'text-slate-900'
+                            }`}
+                            dir="ltr"
+                          >
+                            {formatQty(r.commercialSoldQty)}
+                          </td>
+
+                          <td className="py-2.5 px-4 whitespace-nowrap">
+                            {r.isAutoTarget || !canEditTargets ? (
+                              <span
+                                className="font-num tabular-nums font-semibold text-slate-900 inline-block"
+                                dir="ltr"
+                              >
+                                {formatQty(r.industrialTargetQty)}
+                              </span>
+                            ) : (
+                              <input
+                                type="number"
+                                step="0.001"
+                                min="0"
+                                aria-label={`هدف أصناف الصناعى لـ ${r.employeeName}`}
+                                value={draft?.ind ?? String(r.industrialTargetQty)}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setFeedback(null);
+                                  setTargetsDirty(true);
+                                  setTargetDrafts((prev) => ({
+                                    ...prev,
+                                    [r.participantKey]: {
+                                      ind: val,
+                                      com: prev[r.participantKey]?.com ?? String(r.commercialTargetQty),
+                                    },
+                                  }));
+                                }}
+                                className="w-28 px-2.5 py-1.5 text-xs font-num tabular-nums border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-600 bg-white"
+                                dir="ltr"
+                              />
+                            )}
+                          </td>
+
+                          <td className="py-2.5 px-4 whitespace-nowrap">
+                            {r.isAutoTarget || !canEditTargets ? (
+                              <span
+                                className="font-num tabular-nums font-semibold text-slate-900 inline-block"
+                                dir="ltr"
+                              >
+                                {formatQty(r.commercialTargetQty)}
+                              </span>
+                            ) : (
+                              <input
+                                type="number"
+                                step="0.001"
+                                min="0"
+                                aria-label={`هدف أصناف التجارى لـ ${r.employeeName}`}
+                                value={draft?.com ?? String(r.commercialTargetQty)}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setFeedback(null);
+                                  setTargetsDirty(true);
+                                  setTargetDrafts((prev) => ({
+                                    ...prev,
+                                    [r.participantKey]: {
+                                      ind: prev[r.participantKey]?.ind ?? String(r.industrialTargetQty),
+                                      com: val,
+                                    },
+                                  }));
+                                }}
+                                className="w-28 px-2.5 py-1.5 text-xs font-num tabular-nums border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-600 bg-white"
+                                dir="ltr"
+                              />
+                            )}
+                          </td>
+
+                          <td
+                            className={`py-2.5 px-4 font-num tabular-nums font-semibold whitespace-nowrap ${
+                              r.industrialAchievementPct === null
+                                ? 'text-slate-400'
+                                : r.industrialAchievementPct >= 100
+                                  ? 'text-emerald-700'
+                                  : 'text-teal-700'
+                            }`}
+                            dir="ltr"
+                          >
+                            {formatAchievement(r.industrialAchievementPct)}
+                          </td>
+
+                          <td
+                            className={`py-2.5 px-4 font-num tabular-nums font-semibold whitespace-nowrap ${
+                              r.commercialAchievementPct === null
+                                ? 'text-slate-400'
+                                : r.commercialAchievementPct >= 100
+                                  ? 'text-emerald-700'
+                                  : 'text-teal-700'
+                            }`}
+                            dir="ltr"
+                          >
+                            {formatAchievement(r.commercialAchievementPct)}
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
                 {filteredRows.length > 0 && (
@@ -1390,16 +1693,22 @@ export const CompetitionsView: React.FC<CompetitionsViewProps> = ({
                           : `الإجمالي (${formatNum(filteredRows.length)} مشارك)`}
                       </td>
                       <td className="py-2.5 px-4 font-num tabular-nums whitespace-nowrap" dir="ltr">
-                        {formatQty(exportTotals.targetQty)}
+                        {formatQty(exportTotals.industrialSoldQty)}
                       </td>
                       <td className="py-2.5 px-4 font-num tabular-nums whitespace-nowrap" dir="ltr">
-                        {formatQty(exportTotals.soldStandardQty)}
+                        {formatQty(exportTotals.commercialSoldQty)}
                       </td>
                       <td className="py-2.5 px-4 font-num tabular-nums whitespace-nowrap" dir="ltr">
-                        {formatQty(exportTotals.remainingQty)}
+                        {formatQty(exportTotals.industrialTargetQty)}
+                      </td>
+                      <td className="py-2.5 px-4 font-num tabular-nums whitespace-nowrap" dir="ltr">
+                        {formatQty(exportTotals.commercialTargetQty)}
                       </td>
                       <td className="py-2.5 px-4 font-num tabular-nums text-teal-900 whitespace-nowrap" dir="ltr">
-                        {formatAchievement(exportTotals.achievementPct)}
+                        {formatAchievement(exportTotals.industrialAchievementPct)}
+                      </td>
+                      <td className="py-2.5 px-4 font-num tabular-nums text-teal-900 whitespace-nowrap" dir="ltr">
+                        {formatAchievement(exportTotals.commercialAchievementPct)}
                       </td>
                     </tr>
                   </tfoot>

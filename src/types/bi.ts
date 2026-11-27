@@ -347,10 +347,13 @@ export interface ImportBatchHistoryItem {
   createdAt: string;
 }
 
+export type ClassAType = 'industrial' | 'commercial' | 'other';
+
 export interface CompetitionCatalogItem {
   itemCode: string;
   itemName: string;
   categoryName: string;
+  classAType: ClassAType;
   chainsCategory: string;
   armyCategory: string;
   topRetailCategory: string;
@@ -361,6 +364,8 @@ export interface CompetitionItemConfig {
   itemCode: string;
   itemName: string;
   equivalentFactor: number;
+  classificationA?: string;
+  classAType?: ClassAType;
 }
 
 export interface CompetitionSummary {
@@ -381,11 +386,18 @@ export interface CompetitionParticipantRow {
   roleKind: 'department_manager' | 'sector_manager' | 'supervisor' | 'sales_rep';
   sectorName: string;
   managedSectors: string[];
+  assignedCategories: string[];
   isAutoTarget: boolean;
   targetQty: number;
   soldStandardQty: number;
   remainingQty: number;
   achievementPct: number | null;
+  industrialSoldQty: number;
+  commercialSoldQty: number;
+  industrialTargetQty: number;
+  commercialTargetQty: number;
+  industrialAchievementPct: number | null;
+  commercialAchievementPct: number | null;
 }
 
 export interface CompetitionAnalyticsResponse {
@@ -399,6 +411,12 @@ export interface CompetitionAnalyticsResponse {
     totalStandardSoldQty: number;
     totalTargetQty: number;
     overallAchievementPct: number | null;
+    totalIndustrialSoldQty: number;
+    totalCommercialSoldQty: number;
+    totalIndustrialTargetQty: number;
+    totalCommercialTargetQty: number;
+    industrialAchievementPct: number | null;
+    commercialAchievementPct: number | null;
   };
 }
 

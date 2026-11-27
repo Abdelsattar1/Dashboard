@@ -16,6 +16,7 @@ import {
 import { AuthorizationError } from '../server/auth.ts';
 import {
   calculateQtyAchievementPct,
+  classifyClassA,
   createCompetition,
   deleteCompetition,
   getAvailableCatalogItems,
@@ -2181,7 +2182,263 @@ function runTests() {
     if (fs.existsSync(tmpDbPath)) fs.unlinkSync(tmpDbPath);
   }
 
-  console.log('All Sales BI Engine tests PASSED (20/20 assertion groups verified).');
+  // =========================================================================
+  // 21. Competitions Class A Split (`صناعى` / `تجارى`), Sector-Manager Category
+  //     Isolation in المباشر/المركزي vs Full-Sector in الجيش/التوب ريتيل,
+  //     Dual Targets Persistence, & Department Manager Rollup
+  // =========================================================================
+  assert.equal(classifyClassA('صناعى'), 'industrial');
+  assert.equal(classifyClassA('صناعي'), 'industrial');
+  assert.equal(classifyClassA('أصناف صناعية'), 'industrial');
+  assert.equal(classifyClassA('تجارى'), 'commercial');
+  assert.equal(classifyClassA('تجاري'), 'commercial');
+  assert.equal(classifyClassA('أصناف تجارية'), 'commercial');
+  assert.equal(classifyClassA(''), 'other');
+
+  const classAWb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(
+    classAWb,
+    XLSX.utils.aoa_to_sheet([
+      ['كود القطاع', 'القطاع'],
+      ['S1', 'التوريد المباشر'],
+      ['S2', 'التوريد المركزي'],
+      ['S3', 'الجيش'],
+      ['S4', 'التوب ريتيل'],
+    ]),
+    'القطاعات'
+  );
+  XLSX.utils.book_append_sheet(
+    classAWb,
+    XLSX.utils.aoa_to_sheet([
+      ['القطاع', 'الهدف'],
+      ['التوريد المباشر', 1000],
+      ['التوريد المركزي', 1000],
+      ['الجيش', 1000],
+      ['التوب ريتيل', 1000],
+    ]),
+    'اهداف القطاعات'
+  );
+  XLSX.utils.book_append_sheet(
+    classAWb,
+    XLSX.utils.aoa_to_sheet([
+      ['كود السلسلة', 'اسم السلسلة', 'الادارة', 'اسم المشرف', 'القطاع'],
+      ['C1', 'سلسلة المباشر', 'ادارة المباشر', 'مشرف مباشر', 'التوريد المباشر'],
+      ['C2', 'سلسلة المركزي', 'ادارة المركزي', 'مشرف مركزي', 'التوريد المركزي'],
+      ['C3', 'سلسلة الجيش', 'ادارة الجيش', 'مشرف جيش', 'الجيش'],
+      ['C4', 'سلسلة التوب', 'ادارة التوب', 'مشرف توب', 'التوب ريتيل'],
+    ]),
+    'تعريف الادارات والقطاعات'
+  );
+  XLSX.utils.book_append_sheet(
+    classAWb,
+    XLSX.utils.aoa_to_sheet([
+      ['كود الفرع', 'اسم الفرع', 'الهدف', 'القطاع'],
+      ['B1', 'فرع مباشر', 1000, 'التوريد المباشر'],
+      ['B2', 'فرع مركزي', 1000, 'التوريد المركزي'],
+      ['B3', 'فرع جيش', 1000, 'الجيش'],
+      ['B4', 'فرع توب', 1000, 'التوب ريتيل'],
+    ]),
+    'تعريف الفروع و الاهداف'
+  );
+  XLSX.utils.book_append_sheet(
+    classAWb,
+    XLSX.utils.aoa_to_sheet([
+      ['كود المندوب', 'اسم المندوب', 'القطاع', 'اسم المشرف', 'الهدف'],
+      ['R-D', 'مندوب مباشر', 'التوريد المباشر', 'مشرف مباشر', 0],
+      ['R-C', 'مندوب مركزي', 'التوريد المركزي', 'مشرف مركزي', 0],
+      ['R-A', 'مندوب جيش', 'الجيش', 'مشرف جيش', 0],
+      ['R-T', 'مندوب توب', 'التوب ريتيل', 'مشرف توب', 0],
+    ]),
+    'تعريف مندوبى البيع'
+  );
+  XLSX.utils.book_append_sheet(
+    classAWb,
+    XLSX.utils.aoa_to_sheet([
+      ['كود الصنف', 'الصنف', 'التصنيف A', 'تصنيف السلاسل', 'تصنيف الجيش', 'التوب ريتيل'],
+      ['IND-1', 'دقيق صناعى 50ك', 'صناعى', 'بسكويت + حلويات', 'جيش صناعى', 'توب صناعى'],
+      ['COM-1', 'بسكويت تجارى', 'تجاري', 'بسكويت + حلويات', 'جيش تجارى', 'توب تجارى'],
+      ['IND-2', 'خامات كيك صناعى', 'صناعي', 'كيك + كرواسون', 'جيش صناعى', 'توب صناعى'],
+      ['COM-2', 'قهوة تجارى', 'تجارى', 'مشروبات ساخنة', 'جيش تجارى', 'توب تجارى'],
+    ]),
+    'تعريف الاصناف'
+  );
+  XLSX.utils.book_append_sheet(
+    classAWb,
+    XLSX.utils.aoa_to_sheet([['اسم المستخدم', 'الصلاحيات'], ['u1', 'الكل']]),
+    'تعريف المستخدمين'
+  );
+  XLSX.utils.book_append_sheet(
+    classAWb,
+    XLSX.utils.aoa_to_sheet([
+      ['Sold-to Party', 'Payer', 'Billing Date', 'Sales Employee Code', 'New Total Tax', 'New Growth Value BD&T'],
+      ['B1', 'C1', '2026-11-22', 'R-D', 100, 1000],
+    ]),
+    'VF05N (2)'
+  );
+  XLSX.utils.book_append_sheet(
+    classAWb,
+    XLSX.utils.aoa_to_sheet([
+      ['Billing Dt.', 'Customer', 'Material', 'Sales Emp.', 'Qty', 'Total Tax', 'New Growth Value BD&T'],
+      // Direct supply: IND-1 (بسكويت + حلويات, 10 * 0.5 = 5), COM-1 (بسكويت + حلويات, 12 * 1 = 12), IND-2 (كيك + كرواسون, 6 * 1 = 6)
+      [46348, 'C1', 'IND-1', 'R-D', 10, 0, 100],
+      [46348, 'C1', 'COM-1', 'R-D', 12, 0, 120],
+      [46348, 'C1', 'IND-2', 'R-D', 6, 0, 60],
+      // Central supply: COM-2 (مشروبات ساخنة, 20 * 0.25 = 5), IND-1 (بسكويت + حلويات, 4 * 0.5 = 2)
+      [46348, 'C2', 'COM-2', 'R-C', 20, 0, 200],
+      [46348, 'C2', 'IND-1', 'R-C', 4, 0, 40],
+      // Army: IND-1 (8 * 0.5 = 4), COM-2 (10 * 0.25 = 2.5)
+      [46348, 'C3', 'IND-1', 'R-A', 8, 0, 80],
+      [46348, 'C3', 'COM-2', 'R-A', 10, 0, 100],
+      // Top Retail: IND-2 (3 * 1 = 3), COM-1 (9 * 1 = 9)
+      [46348, 'C4', 'IND-2', 'R-T', 3, 0, 30],
+      [46348, 'C4', 'COM-1', 'R-T', 9, 0, 90],
+    ]),
+    'Zsales_Price (2)'
+  );
+  XLSX.utils.book_append_sheet(
+    classAWb,
+    XLSX.utils.aoa_to_sheet([
+      ['اسم القطاع', 'المسمى الوظيفى', 'اسم الموظف', 'الفئة', 'الهدف'],
+      ['التوريد المباشر', 'مدير قطاع', 'حازم السيد', 'بسكويت + حلويات', 0],
+      ['التوريد المباشر', 'مدير قطاع', 'محمد فؤاد', 'كيك + كرواسون', 0],
+      ['التوريد المركزي', 'مدير قطاع', 'مصطفى مناع', 'بسكويت + حلويات', 0],
+      ['التوريد المركزي', 'مدير قطاع', 'محمد الملا', 'مشروبات ساخنة', 0],
+      // Army & Top Retail sector managers MUST see full sector even if only one category row appears in category_targets!
+      ['الجيش', 'مدير قطاع', 'قائد الجيش', 'بسكويت + حلويات', 0],
+      ['التوب ريتيل', 'مدير قطاع', 'مدير التوب', 'بسكويت + حلويات', 0],
+      ['التوريد المركزي', 'مدير إدارة', 'رأفت محمد', 'بسكويت + حلويات', 0],
+      ['التوريد المباشر + الجيش + التوب ريتيل', 'مدير ادارة', 'عبد الستار مصطفي', 'بسكويت + حلويات', 0],
+    ]),
+    'اهداف الفئات'
+  );
+
+  const classAReport = validateExcelBuffer(
+    XLSX.write(classAWb, { type: 'buffer', bookType: 'xlsx' }) as Buffer,
+    'ClassA_Competitions.xlsx'
+  );
+  assert.equal(classAReport.canCommit, true);
+  commitValidatedImport(db, classAReport.validationToken, { id: 1, fullName: 'مدير النظام' });
+
+  const classAComp = createCompetition(
+    db,
+    { id: 1 },
+    {
+      name: 'مسابقة التصنيف A',
+      items: [
+        { itemCode: 'IND-1', itemName: 'دقيق صناعى 50ك', equivalentFactor: 0.5 },
+        { itemCode: 'COM-1', itemName: 'بسكويت تجارى', equivalentFactor: 1 },
+        { itemCode: 'IND-2', itemName: 'خامات كيك صناعى', equivalentFactor: 1 },
+        { itemCode: 'COM-2', itemName: 'قهوة تجارى', equivalentFactor: 0.25 },
+      ],
+    }
+  );
+
+  const caRes1 = getCompetitionAnalytics(db, adminUser, classAComp.id, { sector: 'ALL' });
+
+  // Sales Reps: full industrial & commercial split
+  const repD = caRes1.participants.find((p) => p.roleKind === 'sales_rep' && p.employeeCode === 'R-D')!;
+  assert.equal(repD.industrialSoldQty, 11); // IND-1 (5) + IND-2 (6)
+  assert.equal(repD.commercialSoldQty, 12); // COM-1 (12)
+  assert.equal(repD.industrialAchievementPct, null); // 0 target -> null, never NaN
+  assert.equal(repD.commercialAchievementPct, null);
+
+  const repC = caRes1.participants.find((p) => p.roleKind === 'sales_rep' && p.employeeCode === 'R-C')!;
+  assert.equal(repC.industrialSoldQty, 2); // IND-1 (2)
+  assert.equal(repC.commercialSoldQty, 5); // COM-2 (5)
+
+  // Sector Managers in التوريد المباشر: scoped strictly to their assigned categories!
+  const hazem = caRes1.participants.find((p) => p.roleKind === 'sector_manager' && p.employeeName === 'حازم السيد')!;
+  const fouad = caRes1.participants.find((p) => p.roleKind === 'sector_manager' && p.employeeName === 'محمد فؤاد')!;
+  assert.deepEqual(hazem.assignedCategories, ['بسكويت + حلويات']);
+  assert.equal(hazem.industrialSoldQty, 5); // ONLY IND-1 from بسكويت + حلويات
+  assert.equal(hazem.commercialSoldQty, 12); // ONLY COM-1 from بسكويت + حلويات
+  assert.deepEqual(fouad.assignedCategories, ['كيك + كرواسون']);
+  assert.equal(fouad.industrialSoldQty, 6); // ONLY IND-2 from كيك + كرواسون
+  assert.equal(fouad.commercialSoldQty, 0);
+
+  // Sector Managers in التوريد المركزي: scoped strictly to their assigned categories!
+  const mostafaManna = caRes1.participants.find((p) => p.roleKind === 'sector_manager' && p.employeeName === 'مصطفى مناع')!;
+  const mulla = caRes1.participants.find((p) => p.roleKind === 'sector_manager' && p.employeeName === 'محمد الملا')!;
+  assert.equal(mostafaManna.industrialSoldQty, 2); // IND-1
+  assert.equal(mostafaManna.commercialSoldQty, 0);
+  assert.equal(mulla.industrialSoldQty, 0);
+  assert.equal(mulla.commercialSoldQty, 5); // COM-2
+
+  // Sector Managers in الجيش & التوب ريتيل: full sector (NOT filtered down to a single category)!
+  const armySecMgrCA = caRes1.participants.find((p) => p.roleKind === 'sector_manager' && p.employeeName === 'قائد الجيش')!;
+  const topSecMgrCA = caRes1.participants.find((p) => p.roleKind === 'sector_manager' && p.employeeName === 'مدير التوب')!;
+  assert.equal(armySecMgrCA.industrialSoldQty, 4); // Full Army industrial
+  assert.equal(armySecMgrCA.commercialSoldQty, 2.5); // Full Army commercial (includes COM-2!)
+  assert.equal(topSecMgrCA.industrialSoldQty, 3); // Full Top Retail industrial (includes IND-2!)
+  assert.equal(topSecMgrCA.commercialSoldQty, 9); // Full Top Retail commercial
+
+  // Department Managers: full scope split into industrial & commercial
+  const abdelCA = caRes1.participants.find((p) => p.roleKind === 'department_manager' && p.employeeName.includes('عبد'))!;
+  const rafatCA = caRes1.participants.find(
+    (p) => p.roleKind === 'department_manager' && (p.employeeName.includes('رافت') || p.employeeName.includes('رأفت'))
+  )!;
+  assert.equal(abdelCA.industrialSoldQty, 18); // 11 Direct + 4 Army + 3 TopRetail
+  assert.equal(abdelCA.commercialSoldQty, 23.5); // 12 Direct + 2.5 Army + 9 TopRetail
+  assert.equal(rafatCA.industrialSoldQty, 2);
+  assert.equal(rafatCA.commercialSoldQty, 5);
+
+  // Save dual Industrial + Commercial targets directly -> check DB persistence, % calc, & مدير إدارة rollup!
+  saveCompetitionTargets(db, classAComp.id, [
+    { participantKey: hazem.participantKey, industrialTargetQty: 10, commercialTargetQty: 24 },
+    { participantKey: fouad.participantKey, industrialTargetQty: 12, commercialTargetQty: 0 },
+    { participantKey: armySecMgrCA.participantKey, industrialTargetQty: 8, commercialTargetQty: 5 },
+    { participantKey: topSecMgrCA.participantKey, industrialTargetQty: 6, commercialTargetQty: 18 },
+    { participantKey: repC.participantKey, industrialTargetQty: 4, commercialTargetQty: 10 },
+  ]);
+
+  const caResAfter = getCompetitionAnalytics(db, adminUser, classAComp.id, { sector: 'ALL' });
+  const hazemAfter = caResAfter.participants.find((p) => p.participantKey === hazem.participantKey)!;
+  assert.equal(hazemAfter.industrialTargetQty, 10);
+  assert.equal(hazemAfter.commercialTargetQty, 24);
+  assert.equal(hazemAfter.industrialAchievementPct, 50);
+  assert.equal(hazemAfter.commercialAchievementPct, 50);
+
+  const fouadAfter = caResAfter.participants.find((p) => p.participantKey === fouad.participantKey)!;
+  assert.equal(fouadAfter.industrialAchievementPct, 50); // 6 / 12
+  assert.equal(fouadAfter.commercialAchievementPct, null); // 0 target -> null (division-by-zero protected)
+
+  const abdelAfter = caResAfter.participants.find((p) => p.participantKey === abdelCA.participantKey)!;
+  assert.equal(abdelAfter.industrialTargetQty, 36); // Direct (10+12) + Army (8) + Top (6)
+  assert.equal(abdelAfter.commercialTargetQty, 47); // Direct (24+0) + Army (5) + Top (18)
+  assert.equal(abdelAfter.industrialAchievementPct, 50); // 18 / 36
+  assert.equal(abdelAfter.commercialAchievementPct, 50); // 23.5 / 47
+
+  const rafatAfter = caResAfter.participants.find((p) => p.participantKey === rafatCA.participantKey)!;
+  assert.equal(rafatAfter.industrialTargetQty, 4); // repC industrial target
+  assert.equal(rafatAfter.commercialTargetQty, 10); // repC commercial target
+  assert.equal(rafatAfter.industrialAchievementPct, 50); // 2 / 4
+  assert.equal(rafatAfter.commercialAchievementPct, 50); // 5 / 10
+
+  // Verify summary totals across visible sectors
+  assert.equal(caResAfter.summary.totalIndustrialSoldQty, 20); // 18 + 2
+  assert.equal(caResAfter.summary.totalCommercialSoldQty, 28.5); // 23.5 + 5
+  assert.equal(caResAfter.summary.totalIndustrialTargetQty, 40); // 36 + 4
+  assert.equal(caResAfter.summary.totalCommercialTargetQty, 57); // 47 + 10
+  assert.equal(caResAfter.summary.industrialAchievementPct, 50);
+  assert.equal(caResAfter.summary.commercialAchievementPct, 50);
+
+  // Verify dual competition targets survive a new Excel import
+  const classAReimport = validateExcelBuffer(
+    XLSX.write(classAWb, { type: 'buffer', bookType: 'xlsx' }) as Buffer,
+    'ClassA_Competitions_Reimport.xlsx'
+  );
+  commitValidatedImport(db, classAReimport.validationToken, { id: 1, fullName: 'مدير النظام' });
+  const caResReloaded = getCompetitionAnalytics(db, adminUser, classAComp.id, { sector: 'ALL' });
+  assert.equal(
+    caResReloaded.participants.find((p) => p.participantKey === hazem.participantKey)!.industrialTargetQty,
+    10
+  );
+  assert.equal(
+    caResReloaded.participants.find((p) => p.participantKey === hazem.participantKey)!.commercialTargetQty,
+    24
+  );
+
+  console.log('All Sales BI Engine tests PASSED (21/21 assertion groups verified).');
 }
 
 runTests();

@@ -28,6 +28,7 @@ import {
   saveCompetitionTargets,
   updateCompetition,
   type CompetitionItemInput,
+  type CompetitionTargetInput,
 } from './server/competitions-engine.ts';
 import {
   AuthorizationError,
@@ -420,7 +421,7 @@ async function startServer() {
       return;
     }
     const { targets } = req.body as {
-      targets?: Array<{ participantKey: string; targetQty: number }>;
+      targets?: CompetitionTargetInput[];
     };
     if (!Array.isArray(targets)) {
       res.status(400).json({ error: 'صيغة الأهداف غير صالحة' });

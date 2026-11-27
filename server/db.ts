@@ -153,6 +153,8 @@ export function initDatabase(customPath?: string): Database.Database {
       competition_id INTEGER NOT NULL REFERENCES competitions(id) ON DELETE CASCADE,
       participant_key TEXT NOT NULL,
       target_qty REAL NOT NULL DEFAULT 0,
+      industrial_target_qty REAL NOT NULL DEFAULT 0,
+      commercial_target_qty REAL NOT NULL DEFAULT 0,
       UNIQUE(competition_id, participant_key)
     );
 
@@ -246,6 +248,15 @@ export function initDatabase(customPath?: string): Database.Database {
   const batchCols = db.prepare(`PRAGMA table_info(import_batches)`).all() as Array<{ name: string }>;
   if (!batchCols.some((c) => c.name === 'has_category_targets_sheet')) {
     db.exec(`ALTER TABLE import_batches ADD COLUMN has_category_targets_sheet INTEGER NOT NULL DEFAULT 0`);
+  }
+
+  // Idempotent migration for industrial_target_qty / commercial_target_qty on competition_targets
+  const compTargetCols = db.prepare(`PRAGMA table_info(competition_targets)`).all() as Array<{ name: string }>;
+  if (!compTargetCols.some((c) => c.name === 'industrial_target_qty')) {
+    db.exec(`ALTER TABLE competition_targets ADD COLUMN industrial_target_qty REAL NOT NULL DEFAULT 0`);
+  }
+  if (!compTargetCols.some((c) => c.name === 'commercial_target_qty')) {
+    db.exec(`ALTER TABLE competition_targets ADD COLUMN commercial_target_qty REAL NOT NULL DEFAULT 0`);
   }
 
   // Idempotent migration: upgrade users table CHECK constraint to ('admin', 'sector_manager', 'standard_user')
