@@ -18,6 +18,20 @@ export interface AuthStatusResponse {
   hasEnvPasscode: boolean;
   clientMode?: boolean;
   defaultAdminAvailable?: boolean;
+  supabaseConfigured?: boolean;
+  supabaseSetupError?: string;
+}
+
+export interface SupabaseStatusResponse {
+  configured: boolean;
+  ok: boolean;
+  userCount: number;
+  message: string;
+}
+
+export interface ChangePasswordResponse {
+  success: boolean;
+  user?: UserProfile;
 }
 
 export interface LoginResponse {

@@ -24,6 +24,7 @@ import { BranchesView } from './components/BranchesView';
 import { CompetitionsView } from './components/CompetitionsView';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ExecutiveDashboard } from './components/ExecutiveDashboard';
+import { ForcePasswordChangeView } from './components/ForcePasswordChangeView';
 import { ImportAdminView, type ImportAdminSubTab } from './components/ImportAdminView';
 import { ItemsView } from './components/ItemsView';
 import { LoginView } from './components/LoginView';
@@ -100,7 +101,10 @@ export default function App() {
   const [needsSetup, setNeedsSetup] = useState(false);
   const [clientMode, setClientMode] = useState(false);
   const [defaultAdminAvailable, setDefaultAdminAvailable] = useState(false);
+  const [supabaseConfigured, setSupabaseConfigured] = useState(false);
+  const [supabaseSetupError, setSupabaseSetupError] = useState<string | null>(null);
   const [user, setUser] = useState<UserProfile | null>(null);
+  const [tempLoginPassword, setTempLoginPassword] = useState('');
 
   const [section, setSection] = useState<NavSection>('dashboard');
   const [importAdminTab, setImportAdminTab] = useState<ImportAdminSubTab>('import');
@@ -224,6 +228,8 @@ export default function App() {
       setNeedsSetup(status.needsSetup);
       setClientMode(Boolean(status.clientMode));
       setDefaultAdminAvailable(Boolean(status.defaultAdminAvailable));
+      setSupabaseConfigured(Boolean(status.supabaseConfigured));
+      setSupabaseSetupError(status.supabaseSetupError || null);
     } catch {
       setNeedsSetup(false);
     } finally {
@@ -234,6 +240,7 @@ export default function App() {
   useEffect(() => {
     setOnUnauthorized(() => {
       setUser(null);
+      setTempLoginPassword('');
       checkAuthStatus();
     });
     checkAuthStatus();
@@ -253,7 +260,7 @@ export default function App() {
   }, [source, sectorFilter, section, jobTitleFilter, selectedCompetitionId, startDate, endDate]);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user || user.mustChangePassword) return;
     let active = true;
     const qs = buildQueryString();
 
@@ -319,6 +326,7 @@ export default function App() {
   const handleLogout = () => {
     setAuthToken(null);
     setUser(null);
+    setTempLoginPassword('');
     setDashData(null);
     setSectorsData(null);
     setBranchesData(null);
@@ -383,8 +391,11 @@ export default function App() {
         needsSetup={needsSetup}
         clientMode={clientMode}
         defaultAdminAvailable={defaultAdminAvailable}
-        onAuthenticated={(loggedInUser) => {
+        supabaseConfigured={supabaseConfigured}
+        supabaseSetupError={supabaseSetupError}
+        onAuthenticated={(loggedInUser, usedPassword) => {
           const userSectors = resolveUserSectors(loggedInUser);
+          setTempLoginPassword(loggedInUser.mustChangePassword ? usedPassword : '');
           setUser(loggedInUser);
           setNeedsSetup(false);
           setSectorFilter(loggedInUser.role !== 'admin' && userSectors.length === 1 ? userSectors[0] : 'ALL');
@@ -396,6 +407,24 @@ export default function App() {
           setImportAdminTab('import');
           setRefreshTick((t) => t + 1);
         }}
+      />
+    );
+  }
+
+  if (user.mustChangePassword) {
+    return (
+      <ForcePasswordChangeView
+        user={user}
+        tempPassword={tempLoginPassword}
+        onCompleted={(updatedUser) => {
+          setTempLoginPassword('');
+          setUser({ ...updatedUser, mustChangePassword: false });
+          if (updatedUser.username === 'admin') {
+            setDefaultAdminAvailable(false);
+          }
+          setRefreshTick((t) => t + 1);
+        }}
+        onLogout={handleLogout}
       />
     );
   }

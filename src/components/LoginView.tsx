@@ -1,20 +1,25 @@
 import React, { useState } from 'react';
-import { BarChart3, KeyRound, Lock, ShieldCheck, User } from 'lucide-react';
+import { BarChart3, Check, Cloud, Copy, KeyRound, Lock, ShieldCheck, User } from 'lucide-react';
 import type { LoginResponse, UserProfile } from '../types/bi';
 import { apiRequest, setAuthToken } from '../utils/api';
 import { CLIENT_DEFAULT_ADMIN_SEED, CLIENT_DEFAULT_ADMIN_USERNAME } from '../utils/client-auth';
+import { SUPABASE_SCHEMA_SQL } from '../utils/supabase-sql';
 
 interface LoginViewProps {
   needsSetup: boolean;
   clientMode?: boolean;
   defaultAdminAvailable?: boolean;
-  onAuthenticated: (user: UserProfile) => void;
+  supabaseConfigured?: boolean;
+  supabaseSetupError?: string | null;
+  onAuthenticated: (user: UserProfile, usedPassword: string) => void;
 }
 
 export const LoginView: React.FC<LoginViewProps> = ({
   needsSetup,
   clientMode = false,
   defaultAdminAvailable = false,
+  supabaseConfigured = false,
+  supabaseSetupError = null,
   onAuthenticated,
 }) => {
   const [username, setUsername] = useState(needsSetup ? 'admin' : '');
@@ -24,6 +29,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [copiedSql, setCopiedSql] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -47,7 +53,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
       });
 
       setAuthToken(res.token);
-      onAuthenticated(res.user);
+      onAuthenticated(res.user, password);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر إتمام العملية');
     } finally {
@@ -93,6 +99,29 @@ export const LoginView: React.FC<LoginViewProps> = ({
               </p>
             </div>
 
+            {supabaseSetupError && (
+              <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-950 space-y-2">
+                <div className="font-bold flex items-center gap-1.5 text-amber-900">
+                  <Cloud className="w-4 h-4 text-amber-700 shrink-0" />
+                  <span>تهيئة جداول Supabase مطلوبة</span>
+                </div>
+                <p className="leading-relaxed">{supabaseSetupError}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(SUPABASE_SCHEMA_SQL).then(() => {
+                      setCopiedSql(true);
+                      setTimeout(() => setCopiedSql(false), 2500);
+                    }).catch(() => {});
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-700 hover:bg-amber-800 text-white rounded text-[11px] font-semibold cursor-pointer"
+                >
+                  {copiedSql ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedSql ? 'تم نسخ كود SQL!' : 'نسخ كود إنشاء الجداول (SQL)'}</span>
+                </button>
+              </div>
+            )}
+
             {clientMode && defaultAdminAvailable && (
               <div className="p-3.5 bg-teal-50/80 border border-teal-200 rounded-lg text-xs text-teal-950 space-y-2">
                 <div className="flex items-center justify-between gap-2">
@@ -123,7 +152,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   </div>
                 </div>
                 <p className="text-[11px] text-teal-800 leading-relaxed">
-                  يعمل التطبيق بالكامل داخل المتصفح مع حفظ المستخدمين والأهداف والبيانات تلقائياً في قاعدة بيانات المتصفح. يُوصى بتغيير كلمة المرور بعد تسجيل الدخول.
+                  {supabaseConfigured
+                    ? 'النظام متصل بقاعدة بيانات Supabase السحابية المشتركة. سيُطلب تعيين كلمة مرور جديدة عند أول دخول.'
+                    : 'يعمل التطبيق داخل المتصفح مع حفظ المستخدمين والأهداف والبيانات تلقائياً. سيُطلب تعيين كلمة مرور جديدة عند أول دخول.'}
                 </p>
               </div>
             )}

@@ -13,7 +13,13 @@ import {
   getRepsAnalytics,
   saveItemCategoryTargets,
 } from '../server/analytics-engine.ts';
-import { AuthorizationError } from '../server/auth.ts';
+import {
+  AuthorizationError,
+  hashPassword,
+  mapDbUserToProfile,
+  verifyPassword,
+  type DbUserRow,
+} from '../server/auth.ts';
 import {
   calculateQtyAchievementPct,
   classifyClassA,
@@ -29,6 +35,7 @@ import { initDatabase } from '../server/db.ts';
 import { commitValidatedImport, excelSerialToIsoDate, rollbackToBatch, validateExcelBuffer } from '../server/excel-engine.ts';
 import { executeAutoFix, recordRuntimeError, rollbackAutoFix, runSmartAudit } from '../server/smart-auditor.ts';
 import type { UserProfile } from '../src/types/bi.ts';
+import { SUPABASE_SCHEMA_SQL } from '../src/utils/supabase-sql.ts';
 
 function buildReferenceTestWorkbook(): Buffer {
   const wb = XLSX.utils.book_new();
@@ -2552,7 +2559,60 @@ function runTests() {
   assert.equal(countBranchesAfterRollback, countBranchesBeforeFix, 'Rollback must restore exact pre-fix branch rows');
   assert.ok(rollbackDupBr.report.findings.some((f) => f.code === 'DUP_BRANCH_ROWS'));
 
-  console.log('All Sales BI Engine tests PASSED (22/22 assertion groups verified).');
+  // =========================================================================
+  // 23. Temporary Password, Mandatory First-Login Change & Admin Reset + Supabase SQL Verification
+  // =========================================================================
+  const tempPw1 = 'TempPass#2026';
+  const permPw = 'MyNewSecurePass#99';
+  const tempPw2 = 'ResetTemp#7788';
+
+  const insertTempRes = db
+    .prepare(
+      `INSERT INTO users (username, full_name, email, role, allowed_sectors, password_hash, must_change_password, is_active, created_at)
+       VALUES (?, ?, ?, 'sector_manager', ?, ?, 1, 1, ?)`
+    )
+    .run(
+      'first_login_user',
+      'موظف أول دخول',
+      'first@company.com',
+      JSON.stringify(['التوريد المباشر']),
+      hashPassword(tempPw1),
+      new Date().toISOString()
+    );
+  const createdTempRow = db.prepare(`SELECT * FROM users WHERE id = ?`).get(Number(insertTempRes.lastInsertRowid)) as DbUserRow;
+  const createdProfile = mapDbUserToProfile(createdTempRow);
+  assert.equal(createdProfile.mustChangePassword, true, 'Newly created user with temp password must require password change');
+  assert.equal(verifyPassword(tempPw1, createdTempRow.password_hash), true);
+
+  // User completes mandatory password change -> hash updates and must_change_password becomes 0
+  db.prepare(`UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?`).run(
+    hashPassword(permPw),
+    createdProfile.id
+  );
+  const changedRow = db.prepare(`SELECT * FROM users WHERE id = ?`).get(createdProfile.id) as DbUserRow;
+  const changedProfile = mapDbUserToProfile(changedRow);
+  assert.equal(changedProfile.mustChangePassword, false, 'Completing first-login change must clear mustChangePassword');
+  assert.equal(verifyPassword(tempPw1, changedRow.password_hash), false, 'Temporary password must no longer match');
+  assert.equal(verifyPassword(permPw, changedRow.password_hash), true, 'New permanent password must match');
+
+  // Admin resets password -> new temp hash saved and must_change_password becomes 1 again
+  db.prepare(`UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?`).run(
+    hashPassword(tempPw2),
+    createdProfile.id
+  );
+  const resetRow = db.prepare(`SELECT * FROM users WHERE id = ?`).get(createdProfile.id) as DbUserRow;
+  const resetProfile = mapDbUserToProfile(resetRow);
+  assert.equal(resetProfile.mustChangePassword, true, 'Admin password reset must re-enable mustChangePassword');
+  assert.equal(verifyPassword(tempPw2, resetRow.password_hash), true);
+  assert.equal(verifyPassword(permPw, resetRow.password_hash), false);
+
+  // Verify embedded Supabase SQL schema defines required tables & must_change_password flag
+  for (const tbl of ['app_users', 'import_batches', 'sectors', 'branches', 'sales_records', 'item_category_targets', 'competitions', 'competition_targets']) {
+    assert.ok(SUPABASE_SCHEMA_SQL.includes(`CREATE TABLE IF NOT EXISTS public.${tbl}`), `Supabase schema must define ${tbl}`);
+  }
+  assert.ok(SUPABASE_SCHEMA_SQL.includes('must_change_password BOOLEAN NOT NULL DEFAULT TRUE'));
+
+  console.log('All Sales BI Engine tests PASSED (23/23 assertion groups verified).');
 }
 
 runTests();

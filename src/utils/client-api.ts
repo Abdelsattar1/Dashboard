@@ -53,6 +53,27 @@ import {
 } from './client-auth.ts';
 import { exportClientDbBytes, getClientDb, persistClientDb } from './client-db.ts';
 import { AuthorizationError } from './errors.ts';
+import {
+  isSupabaseConfigured,
+  supabaseCreateCompetition,
+  supabaseCreateUser,
+  supabaseDeleteCompetition,
+  supabaseDeleteUser,
+  supabaseEnsureDefaultAdmin,
+  supabaseFindUserByUsername,
+  supabaseInsertRuntimeError,
+  supabaseListImportBatches,
+  supabaseListUsers,
+  supabasePushCommittedBatch,
+  supabaseRollbackToBatch,
+  supabaseSyncCompetitionTargetsFromDb,
+  supabaseSyncItemCategoryTargetsFromDb,
+  supabaseTestConnection,
+  supabaseUpdateCompetition,
+  supabaseUpdateUser,
+  syncSupabaseToLocalDb,
+} from './supabase-sync.ts';
+import type Database from 'better-sqlite3';
 
 export class ClientHttpError extends Error {
   status: number;
@@ -123,34 +144,81 @@ function requireTargetEditorUser(user: UserProfile | null): UserProfile {
   return u;
 }
 
+let lastCloudSyncAt = 0;
+let cloudSyncInFlight: Promise<void> | null = null;
+
+async function ensureCloudSynced(db: Database.Database, opts?: { force?: boolean; forceBatch?: boolean }): Promise<void> {
+  if (!isSupabaseConfigured()) return;
+  const now = Date.now();
+  if (!opts?.force && !opts?.forceBatch && now - lastCloudSyncAt < 4000) {
+    return;
+  }
+  if (cloudSyncInFlight) {
+    await cloudSyncInFlight;
+    return;
+  }
+  cloudSyncInFlight = (async () => {
+    try {
+      await syncSupabaseToLocalDb(db, { forceBatch: opts?.forceBatch });
+      lastCloudSyncAt = Date.now();
+    } finally {
+      cloudSyncInFlight = null;
+    }
+  })();
+  await cloudSyncInFlight;
+}
+
 export async function handleClientApiRequest<T>(
   rawUrl: string,
   options: RequestInit = {},
   authToken: string | null
 ): Promise<T> {
   const db = await getClientDb();
-  const seedInfo = await ensureDefaultAdminSeeded(db);
-  if (seedInfo.seededNow) {
-    await persistClientDb();
-  }
+  const useSupabase = isSupabaseConfigured();
 
   const parsedUrl = new URL(rawUrl, 'http://localhost');
   const pathname = parsedUrl.pathname;
   const searchParams = parsedUrl.searchParams;
   const method = (options.method || 'GET').toUpperCase();
-  const currentUser = resolveClientSessionUser(db, authToken);
 
   // ==================== HEALTH & AUTH ====================
   if (pathname === '/api/health' && method === 'GET') {
-    return { status: 'ok', mode: 'client' } as T;
+    return { status: 'ok', mode: useSupabase ? 'supabase' : 'client' } as T;
   }
 
   if (pathname === '/api/auth/status' && method === 'GET') {
+    if (useSupabase) {
+      try {
+        const sbSeed = await supabaseEnsureDefaultAdmin();
+        return {
+          needsSetup: false,
+          hasEnvPasscode: false,
+          clientMode: true,
+          defaultAdminAvailable: sbSeed.defaultAdminPendingChange,
+          supabaseConfigured: true,
+        } as T;
+      } catch (err) {
+        return {
+          needsSetup: false,
+          hasEnvPasscode: false,
+          clientMode: true,
+          defaultAdminAvailable: false,
+          supabaseConfigured: true,
+          supabaseSetupError: err instanceof Error ? err.message : 'تعذر الاتصال بـ Supabase',
+        } as T;
+      }
+    }
+
+    const seedInfo = await ensureDefaultAdminSeeded(db);
+    if (seedInfo.seededNow) {
+      await persistClientDb();
+    }
     return {
       needsSetup: false,
       hasEnvPasscode: false,
       clientMode: true,
       defaultAdminAvailable: seedInfo.defaultAdminPendingChange,
+      supabaseConfigured: false,
     } as T;
   }
 
@@ -165,6 +233,47 @@ export async function handleClientApiRequest<T>(
 
     if (!cleanUsername || !cleanPass) {
       throw new ClientHttpError(400, 'يرجى إدخال اسم المستخدم وكلمة المرور');
+    }
+
+    if (useSupabase) {
+      try {
+        await supabaseEnsureDefaultAdmin();
+        const remoteRow = await supabaseFindUserByUsername(cleanUsername);
+        if (!remoteRow || !remoteRow.is_active) {
+          throw new ClientHttpError(401, 'بيانات الدخول غير صحيحة أو الحساب غير مفعل');
+        }
+        const ok = await verifyPasswordClient(cleanPass, remoteRow.password_hash);
+        if (!ok) {
+          throw new ClientHttpError(401, 'بيانات الدخول غير صحيحة');
+        }
+        await ensureCloudSynced(db, { force: true });
+        await persistClientDb();
+        const localUser = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(remoteRow.id)) as ClientDbUserRow | undefined;
+        const profile = localUser ? mapClientUserRow(localUser) : mapClientUserRow({
+          id: Number(remoteRow.id),
+          username: remoteRow.username,
+          full_name: remoteRow.full_name,
+          email: remoteRow.email ?? null,
+          role: remoteRow.role,
+          allowed_sectors: Array.isArray(remoteRow.allowed_sectors)
+            ? JSON.stringify(remoteRow.allowed_sectors)
+            : String(remoteRow.allowed_sectors || '[]'),
+          password_hash: remoteRow.password_hash,
+          must_change_password: remoteRow.must_change_password ? 1 : 0,
+          is_active: remoteRow.is_active ? 1 : 0,
+          created_at: remoteRow.created_at,
+        });
+        const token = issueClientSessionToken(profile.id);
+        return { token, user: profile } as T;
+      } catch (err) {
+        if (err instanceof ClientHttpError) throw err;
+        throw new ClientHttpError(400, err instanceof Error ? err.message : 'تعذر تسجيل الدخول عبر Supabase');
+      }
+    }
+
+    const seedInfo = await ensureDefaultAdminSeeded(db);
+    if (seedInfo.seededNow) {
+      await persistClientDb();
     }
 
     const row = db
@@ -185,6 +294,17 @@ export async function handleClientApiRequest<T>(
     return { token, user: profile } as T;
   }
 
+  if (!useSupabase) {
+    const seedInfo = await ensureDefaultAdminSeeded(db);
+    if (seedInfo.seededNow) {
+      await persistClientDb();
+    }
+  } else if (method === 'GET' && !pathname.startsWith('/api/admin/supabase-status')) {
+    await ensureCloudSynced(db);
+  }
+
+  const currentUser = resolveClientSessionUser(db, authToken);
+
   if (pathname === '/api/auth/me' && method === 'GET') {
     const u = requireUser(currentUser);
     return { user: u } as T;
@@ -202,10 +322,24 @@ export async function handleClientApiRequest<T>(
     if (!row || !(await verifyPasswordClient(String(currentPassword || ''), row.password_hash))) {
       throw new ClientHttpError(400, 'كلمة المرور الحالية غير صحيحة');
     }
+    if (row.must_change_password === 1 && String(currentPassword || '') === newPassword) {
+      throw new ClientHttpError(400, 'كلمة المرور الجديدة يجب أن تختلف عن كلمة المرور المبدئية');
+    }
     const nextHash = await hashPasswordClient(newPassword);
+    if (useSupabase) {
+      const updatedUser = await supabaseUpdateUser(u.id, {
+        password_hash: nextHash,
+        must_change_password: false,
+      });
+      db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(nextHash, u.id);
+      lastCloudSyncAt = Date.now();
+      await persistClientDb();
+      return { success: true, user: updatedUser } as T;
+    }
     db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(nextHash, u.id);
     await persistClientDb();
-    return { success: true } as T;
+    const updated = db.prepare('SELECT * FROM users WHERE id = ?').get(u.id) as ClientDbUserRow;
+    return { success: true, user: mapClientUserRow(updated) } as T;
   }
 
   // ==================== ANALYTICS ====================
@@ -269,6 +403,10 @@ export async function handleClientApiRequest<T>(
     }
     try {
       saveItemCategoryTargets(db, targets, u);
+      if (useSupabase) {
+        await supabaseSyncItemCategoryTargetsFromDb(db);
+        lastCloudSyncAt = Date.now();
+      }
       await persistClientDb();
       return { success: true } as T;
     } catch (err) {
@@ -339,6 +477,14 @@ export async function handleClientApiRequest<T>(
     const { name, items } = parseJsonBody<{ name?: string; items?: CompetitionItemInput[] }>(options.body);
     try {
       const created = createCompetition(db, { id: u.id }, { name: String(name || ''), items });
+      if (useSupabase) {
+        const remoteCompId = await supabaseCreateCompetition(db, u.id, created.name, created.items);
+        lastCloudSyncAt = Date.now();
+        await persistClientDb();
+        const syncedList = listCompetitions(db);
+        const syncedComp = syncedList.find((c) => c.id === remoteCompId) || created;
+        return { competition: syncedComp } as T;
+      }
       await persistClientDb();
       return { competition: created } as T;
     } catch (err) {
@@ -355,6 +501,14 @@ export async function handleClientApiRequest<T>(
     );
     try {
       const updated = updateCompetition(db, compId, { name, isActive, items });
+      if (useSupabase) {
+        await supabaseUpdateCompetition(db, compId, {
+          name: updated.name,
+          isActive: updated.isActive,
+          items: updated.items,
+        });
+        lastCloudSyncAt = Date.now();
+      }
       await persistClientDb();
       return { competition: updated } as T;
     } catch (err) {
@@ -367,6 +521,10 @@ export async function handleClientApiRequest<T>(
     const compId = Number(compItemMatch[1]);
     try {
       deleteCompetition(db, compId);
+      if (useSupabase) {
+        await supabaseDeleteCompetition(db, compId);
+        lastCloudSyncAt = Date.now();
+      }
       await persistClientDb();
       return { success: true } as T;
     } catch (err) {
@@ -384,6 +542,10 @@ export async function handleClientApiRequest<T>(
     }
     try {
       saveCompetitionTargets(db, compId, targets, u);
+      if (useSupabase) {
+        await supabaseSyncCompetitionTargetsFromDb(db, compId);
+        lastCloudSyncAt = Date.now();
+      }
       await persistClientDb();
       return { success: true } as T;
     } catch (err) {
@@ -420,6 +582,12 @@ export async function handleClientApiRequest<T>(
     }
     try {
       const batch = commitValidatedImport(db, validationToken, { id: u.id, fullName: u.fullName });
+      if (useSupabase) {
+        const remoteBatch = await supabasePushCommittedBatch(db, batch.id);
+        lastCloudSyncAt = Date.now();
+        await persistClientDb();
+        return { success: true, batch: remoteBatch } as T;
+      }
       await persistClientDb();
       return { success: true, batch } as T;
     } catch (err) {
@@ -429,6 +597,10 @@ export async function handleClientApiRequest<T>(
 
   if (pathname === '/api/import/history' && method === 'GET') {
     requireAdminUser(currentUser);
+    if (useSupabase) {
+      const batches = await supabaseListImportBatches();
+      return { batches } as T;
+    }
     const rows = db.prepare(`SELECT * FROM import_batches ORDER BY id DESC`).all() as Array<{
       id: number;
       batch_uuid: string;
@@ -469,6 +641,12 @@ export async function handleClientApiRequest<T>(
     requireAdminUser(currentUser);
     const batchId = Number(rollbackBatchMatch[1]);
     try {
+      if (useSupabase) {
+        const restored = await supabaseRollbackToBatch(db, batchId);
+        lastCloudSyncAt = Date.now();
+        await persistClientDb();
+        return { success: true, batch: restored } as T;
+      }
       const restored = rollbackToBatch(db, batchId);
       await persistClientDb();
       return { success: true, batch: restored } as T;
@@ -480,25 +658,31 @@ export async function handleClientApiRequest<T>(
   // ==================== USER MANAGEMENT ====================
   if (pathname === '/api/users' && method === 'GET') {
     requireAdminUser(currentUser);
+    if (useSupabase) {
+      const users = await supabaseListUsers();
+      return { users } as T;
+    }
     const rows = db.prepare('SELECT * FROM users ORDER BY id ASC').all() as ClientDbUserRow[];
     return { users: rows.map(mapClientUserRow) } as T;
   }
 
   if (pathname === '/api/users' && method === 'POST') {
     requireAdminUser(currentUser);
-    const { username, fullName, email, role, allowedSectors, password } = parseJsonBody<{
+    const { username, fullName, email, role, allowedSectors, password, mustChangePassword } = parseJsonBody<{
       username?: string;
       fullName?: string;
       email?: string;
       role?: string;
       allowedSectors?: string[];
       password?: string;
+      mustChangePassword?: boolean;
     }>(options.body);
 
     const cleanUsername = String(username || '').trim().toLowerCase();
     const cleanName = String(fullName || '').trim();
     const cleanPass = String(password || '');
     const cleanRole = parseStrictUserRole(role ?? 'standard_user');
+    const forceFirstChange = typeof mustChangePassword === 'boolean' ? mustChangePassword : true;
 
     if (!cleanRole) throw new ClientHttpError(400, 'الدور الوظيفي المحدد غير صالح');
     if (!cleanUsername || cleanUsername.length < 3) {
@@ -506,23 +690,39 @@ export async function handleClientApiRequest<T>(
     }
     if (!cleanName) throw new ClientHttpError(400, 'يرجى إدخال الاسم الكامل');
     if (cleanPass.length < 8) {
-      throw new ClientHttpError(400, 'كلمة المرور يجب أن لا تقل عن 8 أحرف');
+      throw new ClientHttpError(400, 'كلمة المرور المبدئية يجب أن لا تقل عن 8 أحرف');
     }
-
-    const exists = db.prepare('SELECT id FROM users WHERE lower(username) = ?').get(cleanUsername);
-    if (exists) throw new ClientHttpError(409, 'اسم المستخدم مسجل بالفعل');
 
     const sectors = cleanRole === 'admin' ? [...ORIGINAL_SECTORS] : sanitizeSectorsInput(allowedSectors);
     if (cleanRole !== 'admin' && sectors.length === 0) {
       throw new ClientHttpError(400, 'يرجى تحديد قطاع واحد على الأقل لهذا المستخدم');
     }
 
-    const now = new Date().toISOString();
     const pwHash = await hashPasswordClient(cleanPass);
+
+    if (useSupabase) {
+      const created = await supabaseCreateUser({
+        username: cleanUsername,
+        fullName: cleanName,
+        email: email ? String(email).trim() : null,
+        role: cleanRole,
+        allowedSectors: sectors,
+        passwordHash: pwHash,
+        mustChangePassword: forceFirstChange,
+      });
+      await ensureCloudSynced(db, { force: true });
+      await persistClientDb();
+      return { user: created } as T;
+    }
+
+    const exists = db.prepare('SELECT id FROM users WHERE lower(username) = ?').get(cleanUsername);
+    if (exists) throw new ClientHttpError(409, 'اسم المستخدم مسجل بالفعل');
+
+    const now = new Date().toISOString();
     const resInsert = db
       .prepare(
         `INSERT INTO users (username, full_name, email, role, allowed_sectors, password_hash, must_change_password, is_active, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?)`
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`
       )
       .run(
         cleanUsername,
@@ -531,6 +731,7 @@ export async function handleClientApiRequest<T>(
         cleanRole,
         JSON.stringify(sectors),
         pwHash,
+        forceFirstChange ? 1 : 0,
         now
       );
 
@@ -541,6 +742,36 @@ export async function handleClientApiRequest<T>(
     return { user: mapClientUserRow(created) } as T;
   }
 
+  const resetPwMatch = pathname.match(/^\/api\/users\/(\d+)\/reset-password$/);
+  if (resetPwMatch && method === 'POST') {
+    requireAdminUser(currentUser);
+    const targetId = Number(resetPwMatch[1]);
+    const { temporaryPassword } = parseJsonBody<{ temporaryPassword?: string }>(options.body);
+    const cleanPass = String(temporaryPassword || '');
+    if (cleanPass.length < 8) {
+      throw new ClientHttpError(400, 'كلمة المرور المبدئية يجب أن لا تقل عن 8 أحرف');
+    }
+    const existing = db.prepare('SELECT * FROM users WHERE id = ?').get(targetId) as ClientDbUserRow | undefined;
+    if (!existing) throw new ClientHttpError(404, 'المستخدم غير موجود');
+
+    const nextHash = await hashPasswordClient(cleanPass);
+    if (useSupabase) {
+      const updated = await supabaseUpdateUser(targetId, {
+        password_hash: nextHash,
+        must_change_password: true,
+      });
+      db.prepare('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?').run(nextHash, targetId);
+      lastCloudSyncAt = Date.now();
+      await persistClientDb();
+      return { user: updated } as T;
+    }
+
+    db.prepare('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?').run(nextHash, targetId);
+    await persistClientDb();
+    const updated = db.prepare('SELECT * FROM users WHERE id = ?').get(targetId) as ClientDbUserRow;
+    return { user: mapClientUserRow(updated) } as T;
+  }
+
   const userPatchMatch = pathname.match(/^\/api\/users\/(\d+)$/);
   if (userPatchMatch && method === 'PATCH') {
     const admin = requireAdminUser(currentUser);
@@ -548,13 +779,14 @@ export async function handleClientApiRequest<T>(
     const existing = db.prepare('SELECT * FROM users WHERE id = ?').get(targetId) as ClientDbUserRow | undefined;
     if (!existing) throw new ClientHttpError(404, 'المستخدم غير موجود');
 
-    const { fullName, email, role, allowedSectors, isActive, newPassword } = parseJsonBody<{
+    const { fullName, email, role, allowedSectors, isActive, newPassword, mustChangePassword } = parseJsonBody<{
       fullName?: string;
       email?: string | null;
       role?: string;
       allowedSectors?: string[];
       isActive?: boolean;
       newPassword?: string;
+      mustChangePassword?: boolean;
     }>(options.body);
 
     let nextRole: UserRole =
@@ -574,13 +806,13 @@ export async function handleClientApiRequest<T>(
       throw new ClientHttpError(400, 'لا يمكنك تعطيل حسابك أو خفض صلاحيتك أثناء تسجيل الدخول');
     }
 
-    let nextSectorsJson = existing.allowed_sectors;
+    let nextSectorsList: string[] = [];
     if (nextRole === 'admin') {
-      nextSectorsJson = JSON.stringify([...ORIGINAL_SECTORS]);
+      nextSectorsList = [...ORIGINAL_SECTORS];
     } else if (allowedSectors !== undefined) {
       const cleaned = sanitizeSectorsInput(allowedSectors);
       if (cleaned.length === 0) throw new ClientHttpError(400, 'يرجى تحديد قطاع واحد على الأقل لهذا المستخدم');
-      nextSectorsJson = JSON.stringify(cleaned);
+      nextSectorsList = cleaned;
     } else {
       let existingList: string[] = [];
       try {
@@ -590,31 +822,52 @@ export async function handleClientApiRequest<T>(
         existingList = [];
       }
       if (existingList.length === 0) throw new ClientHttpError(400, 'يرجى تحديد قطاع واحد على الأقل لهذا المستخدم');
-      nextSectorsJson = JSON.stringify(existingList);
+      nextSectorsList = existingList;
     }
+    const nextSectorsJson = JSON.stringify(nextSectorsList);
 
     if (newPassword && newPassword.length > 0 && newPassword.length < 8) {
       throw new ClientHttpError(400, 'كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل');
     }
-    const nextHash =
-      newPassword && newPassword.length >= 8 ? await hashPasswordClient(newPassword) : existing.password_hash;
+    const hasNewPass = Boolean(newPassword && newPassword.length >= 8);
+    const nextHash = hasNewPass ? await hashPasswordClient(newPassword!) : existing.password_hash;
     const nextMustChange =
-      newPassword && newPassword.length >= 8 ? 0 : existing.must_change_password;
+      typeof mustChangePassword === 'boolean'
+        ? mustChangePassword
+          ? 1
+          : 0
+        : hasNewPass
+          ? 0
+          : existing.must_change_password;
+
+    const nextFullName = fullName ? String(fullName).trim() : existing.full_name;
+    const nextEmail = email !== undefined ? (email ? String(email).trim() : null) : existing.email;
+
+    if (useSupabase) {
+      const updatedUser = await supabaseUpdateUser(targetId, {
+        full_name: nextFullName,
+        email: nextEmail,
+        role: nextRole,
+        allowed_sectors: nextSectorsList,
+        is_active: nextActive === 1,
+        password_hash: nextHash,
+        must_change_password: nextMustChange === 1,
+      });
+      db.prepare(
+        `UPDATE users
+         SET full_name = ?, email = ?, role = ?, allowed_sectors = ?, is_active = ?, password_hash = ?, must_change_password = ?
+         WHERE id = ?`
+      ).run(nextFullName, nextEmail, nextRole, nextSectorsJson, nextActive, nextHash, nextMustChange, targetId);
+      lastCloudSyncAt = Date.now();
+      await persistClientDb();
+      return { user: updatedUser } as T;
+    }
 
     db.prepare(
       `UPDATE users
        SET full_name = ?, email = ?, role = ?, allowed_sectors = ?, is_active = ?, password_hash = ?, must_change_password = ?
        WHERE id = ?`
-    ).run(
-      fullName ? String(fullName).trim() : existing.full_name,
-      email !== undefined ? (email ? String(email).trim() : null) : existing.email,
-      nextRole,
-      nextSectorsJson,
-      nextActive,
-      nextHash,
-      nextMustChange,
-      targetId
-    );
+    ).run(nextFullName, nextEmail, nextRole, nextSectorsJson, nextActive, nextHash, nextMustChange, targetId);
 
     await persistClientDb();
     const updated = db.prepare('SELECT * FROM users WHERE id = ?').get(targetId) as ClientDbUserRow;
@@ -627,9 +880,23 @@ export async function handleClientApiRequest<T>(
     if (targetId === admin.id) {
       throw new ClientHttpError(400, 'لا يمكنك حذف حسابك النشط');
     }
+    if (useSupabase) {
+      await supabaseDeleteUser(targetId);
+      lastCloudSyncAt = 0;
+    }
     db.prepare('DELETE FROM users WHERE id = ?').run(targetId);
     await persistClientDb();
     return { success: true } as T;
+  }
+
+  // ==================== SUPABASE STATUS ====================
+  if (pathname === '/api/admin/supabase-status' && method === 'GET') {
+    requireAdminUser(currentUser);
+    const result = await supabaseTestConnection();
+    return {
+      configured: useSupabase,
+      ...result,
+    } as T;
   }
 
   // ==================== SMART AUDITOR & RUNTIME ERRORS ====================
@@ -648,6 +915,20 @@ export async function handleClientApiRequest<T>(
       throw new ClientHttpError(400, 'رسالة الخطأ مطلوبة');
     }
     const log = recordRuntimeError(db, { id: u.id, username: u.username }, body);
+    if (useSupabase) {
+      supabaseInsertRuntimeError({
+        kind: log.kind,
+        tabName: log.tabName,
+        message: log.message,
+        stack: log.stack,
+        sourceUrl: log.sourceUrl,
+        lineNo: log.lineNo,
+        colNo: log.colNo,
+        userId: u.id,
+        username: u.username,
+        occurredAt: log.occurredAt,
+      }).catch(() => {});
+    }
     await persistClientDb();
     return { recorded: true, id: log.id } as T;
   }

@@ -219,11 +219,16 @@ async function startServer() {
       res.status(400).json({ error: 'كلمة المرور الحالية غير صحيحة' });
       return;
     }
+    if (row.must_change_password === 1 && String(currentPassword || '') === newPassword) {
+      res.status(400).json({ error: 'كلمة المرور الجديدة يجب أن تختلف عن كلمة المرور المبدئية' });
+      return;
+    }
     db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(
       hashPassword(newPassword),
       req.user!.id
     );
-    res.json({ success: true });
+    const updatedRow = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user!.id) as DbUserRow;
+    res.json({ success: true, user: mapDbUserToProfile(updatedRow) });
   });
 
   // ==================== ANALYTICS ROUTES ====================
@@ -568,19 +573,21 @@ async function startServer() {
   };
 
   app.post('/api/users', requireAuth, requireAdmin, (req, res) => {
-    const { username, fullName, email, role, allowedSectors, password } = req.body as {
+    const { username, fullName, email, role, allowedSectors, password, mustChangePassword } = req.body as {
       username?: string;
       fullName?: string;
       email?: string;
       role?: string;
       allowedSectors?: string[];
       password?: string;
+      mustChangePassword?: boolean;
     };
 
     const cleanUsername = String(username || '').trim().toLowerCase();
     const cleanName = String(fullName || '').trim();
     const cleanPass = String(password || '');
     const cleanRole = parseStrictUserRole(role ?? 'standard_user');
+    const forceFirstChange = typeof mustChangePassword === 'boolean' ? mustChangePassword : true;
 
     if (!cleanRole) {
       res.status(400).json({ error: 'الدور الوظيفي المحدد غير صالح' });
@@ -595,7 +602,7 @@ async function startServer() {
       return;
     }
     if (cleanPass.length < 8) {
-      res.status(400).json({ error: 'كلمة المرور يجب أن لا تقل عن 8 أحرف' });
+      res.status(400).json({ error: 'كلمة المرور المبدئية يجب أن لا تقل عن 8 أحرف' });
       return;
     }
 
@@ -615,12 +622,42 @@ async function startServer() {
     const resInsert = db
       .prepare(
         `INSERT INTO users (username, full_name, email, role, allowed_sectors, password_hash, must_change_password, is_active, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?)`
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`
       )
-      .run(cleanUsername, cleanName, email ? String(email).trim() : null, cleanRole, JSON.stringify(sectors), hashPassword(cleanPass), now);
+      .run(
+        cleanUsername,
+        cleanName,
+        email ? String(email).trim() : null,
+        cleanRole,
+        JSON.stringify(sectors),
+        hashPassword(cleanPass),
+        forceFirstChange ? 1 : 0,
+        now
+      );
 
     const created = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(resInsert.lastInsertRowid)) as DbUserRow;
     res.status(201).json({ user: mapDbUserToProfile(created) });
+  });
+
+  app.post('/api/users/:id/reset-password', requireAuth, requireAdmin, (req, res) => {
+    const targetId = Number(req.params.id);
+    const { temporaryPassword } = req.body as { temporaryPassword?: string };
+    const cleanPass = String(temporaryPassword || '');
+    if (cleanPass.length < 8) {
+      res.status(400).json({ error: 'كلمة المرور المبدئية يجب أن لا تقل عن 8 أحرف' });
+      return;
+    }
+    const existing = db.prepare('SELECT * FROM users WHERE id = ?').get(targetId) as DbUserRow | undefined;
+    if (!existing) {
+      res.status(404).json({ error: 'المستخدم غير موجود' });
+      return;
+    }
+    db.prepare('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?').run(
+      hashPassword(cleanPass),
+      targetId
+    );
+    const updated = db.prepare('SELECT * FROM users WHERE id = ?').get(targetId) as DbUserRow;
+    res.json({ user: mapDbUserToProfile(updated) });
   });
 
   app.patch('/api/users/:id', requireAuth, requireAdmin, (req: AuthenticatedRequest, res) => {
@@ -631,13 +668,14 @@ async function startServer() {
       return;
     }
 
-    const { fullName, email, role, allowedSectors, isActive, newPassword } = req.body as {
+    const { fullName, email, role, allowedSectors, isActive, newPassword, mustChangePassword } = req.body as {
       fullName?: string;
       email?: string | null;
       role?: string;
       allowedSectors?: string[];
       isActive?: boolean;
       newPassword?: string;
+      mustChangePassword?: boolean;
     };
 
     let nextRole: UserRole =
@@ -693,11 +731,20 @@ async function startServer() {
       res.status(400).json({ error: 'كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل' });
       return;
     }
-    const nextHash = newPassword && newPassword.length >= 8 ? hashPassword(newPassword) : existing.password_hash;
+    const hasNewPass = Boolean(newPassword && newPassword.length >= 8);
+    const nextHash = hasNewPass ? hashPassword(newPassword!) : existing.password_hash;
+    const nextMustChange =
+      typeof mustChangePassword === 'boolean'
+        ? mustChangePassword
+          ? 1
+          : 0
+        : hasNewPass
+          ? 0
+          : existing.must_change_password;
 
     db.prepare(
       `UPDATE users
-       SET full_name = ?, email = ?, role = ?, allowed_sectors = ?, is_active = ?, password_hash = ?
+       SET full_name = ?, email = ?, role = ?, allowed_sectors = ?, is_active = ?, password_hash = ?, must_change_password = ?
        WHERE id = ?`
     ).run(
       fullName ? String(fullName).trim() : existing.full_name,
@@ -706,6 +753,7 @@ async function startServer() {
       nextSectorsJson,
       nextActive,
       nextHash,
+      nextMustChange,
       targetId
     );
 
@@ -721,6 +769,20 @@ async function startServer() {
     }
     db.prepare('DELETE FROM users WHERE id = ?').run(targetId);
     res.json({ success: true });
+  });
+
+  app.get('/api/admin/supabase-status', requireAuth, requireAdmin, (_req, res) => {
+    const url = String(process.env.VITE_SUPABASE_URL || '').trim();
+    const anonKey = String(process.env.VITE_SUPABASE_ANON_KEY || '').trim();
+    const configured = Boolean(url && anonKey && /^https?:\/\//i.test(url));
+    res.json({
+      configured,
+      ok: configured,
+      userCount: 0,
+      message: configured
+        ? 'تم العثور على متغيرات VITE_SUPABASE_URL و VITE_SUPABASE_ANON_KEY.'
+        : 'يعمل التطبيق حالياً على قاعدة SQLite المحلية. للربط السحابي المشترك على Vercel، أضف متغيرات VITE_SUPABASE_URL و VITE_SUPABASE_ANON_KEY ونفذ كود SQL المرفق.',
+    });
   });
 
   // ==================== SMART AUDITOR & RUNTIME ERROR MONITORING ROUTES ====================
@@ -822,6 +884,7 @@ async function startServer() {
         'server.ts',
         'src',
         'server',
+        'supabase',
         'tests',
       ];
 

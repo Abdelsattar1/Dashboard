@@ -2,31 +2,48 @@ import React, { useEffect, useState } from 'react';
 import {
   AlertTriangle,
   ArchiveRestore,
+  Check,
   CheckCircle2,
+  Cloud,
+  Copy,
   Download,
+  Eye,
+  EyeOff,
   FileSpreadsheet,
   FolderArchive,
   History,
   KeyRound,
   Plus,
+  RefreshCw,
+  RotateCcw,
   Trash2,
   Upload,
   Users,
+  Wand2,
   XCircle,
 } from 'lucide-react';
 import type {
   ImportBatchHistoryItem,
   ImportValidationReport,
+  SupabaseStatusResponse,
   UserProfile,
   UserRole,
 } from '../types/bi';
 import { apiRequest, downloadProtectedFile } from '../utils/api';
 import { formatDateTime, formatEGP, formatNum } from '../utils/format';
 import { getRoleLabel, getRolePermissionsHint } from '../utils/roles';
+import { SUPABASE_SCHEMA_SQL } from '../utils/supabase-sql';
 
 const ALL_SECTORS = ['التوريد المباشر', 'التوريد المركزي', 'التوب ريتيل', 'الجيش'] as const;
 
-export type ImportAdminSubTab = 'import' | 'history' | 'users' | 'export';
+export type ImportAdminSubTab = 'import' | 'history' | 'users' | 'supabase' | 'export';
+
+function generateTempPassword(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$';
+  const buf = new Uint8Array(10);
+  window.crypto.getRandomValues(buf);
+  return Array.from(buf, (b) => chars[b % chars.length]).join('');
+}
 
 interface ImportAdminViewProps {
   currentUser: UserProfile;
@@ -67,11 +84,24 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
   const [newRole, setNewRole] = useState<UserRole>('standard_user');
   const [newSectors, setNewSectors] = useState<string[]>(['التوريد المباشر']);
   const [newPassword, setNewPassword] = useState('');
+  const [newMustChangePassword, setNewMustChangePassword] = useState(true);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [copiedNewPw, setCopiedNewPw] = useState(false);
   const [editingUserId, setEditingUserId] = useState<number | null>(null);
   const [editFullName, setEditFullName] = useState('');
   const [editPassword, setEditPassword] = useState('');
   const [editSectors, setEditSectors] = useState<string[]>([]);
   const [editRole, setEditRole] = useState<UserRole>('standard_user');
+
+  // Password reset state
+  const [resetUserId, setResetUserId] = useState<number | null>(null);
+  const [resetTempPassword, setResetTempPassword] = useState('');
+  const [resetSaving, setResetSaving] = useState(false);
+
+  // Supabase tab state
+  const [sbStatus, setSbStatus] = useState<SupabaseStatusResponse | null>(null);
+  const [sbLoading, setSbLoading] = useState(false);
+  const [copiedSql, setCopiedSql] = useState(false);
 
   const loadHistory = async () => {
     setLoadingBatches(true);
@@ -97,9 +127,27 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
     }
   };
 
+  const loadSupabaseStatus = async () => {
+    setSbLoading(true);
+    try {
+      const res = await apiRequest<SupabaseStatusResponse>('/api/admin/supabase-status');
+      setSbStatus(res);
+    } catch (err) {
+      setSbStatus({
+        configured: false,
+        ok: false,
+        userCount: 0,
+        message: err instanceof Error ? err.message : 'تعذر فحص حالة Supabase',
+      });
+    } finally {
+      setSbLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (activeTab === 'history') loadHistory();
     if (activeTab === 'users') loadUsers();
+    if (activeTab === 'supabase') loadSupabaseStatus();
   }, [activeTab]);
 
   const handleValidateFile = async (file: File) => {
@@ -200,18 +248,50 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
           role: newRole,
           allowedSectors: newRole === 'admin' ? [...ALL_SECTORS] : newSectors,
           password: newPassword,
+          mustChangePassword: newMustChangePassword,
         }),
       });
-      setUserSuccess(`تم إنشاء حساب «${newFullName.trim() || newUsername.trim()}» بنجاح.`);
+      setUserSuccess(
+        `تم إنشاء حساب «${newFullName.trim() || newUsername.trim()}» بنجاح.${
+          newMustChangePassword ? ' سيُطلب منه تعيين كلمة مرور جديدة عند أول دخول.' : ''
+        }`
+      );
       setNewUsername('');
       setNewFullName('');
       setNewEmail('');
       setNewPassword('');
+      setNewMustChangePassword(true);
       setNewRole('standard_user');
       setNewSectors(['التوريد المباشر']);
       await loadUsers();
     } catch (err) {
       setUserError(err instanceof Error ? err.message : 'تعذر إنشاء المستخدم');
+    }
+  };
+
+  const handleResetUserPassword = async (u: UserProfile) => {
+    setUserError(null);
+    setUserSuccess(null);
+    if (resetTempPassword.length < 8) {
+      setUserError('كلمة المرور المبدئية الجديدة يجب أن لا تقل عن 8 أحرف');
+      return;
+    }
+    setResetSaving(true);
+    try {
+      await apiRequest(`/api/users/${u.id}/reset-password`, {
+        method: 'POST',
+        body: JSON.stringify({ temporaryPassword: resetTempPassword }),
+      });
+      setUserSuccess(
+        `تم تعيين كلمة مرور مبدئية جديدة للمستخدم «${u.fullName}»، وسيُلزم بتغييرها فور تسجيل الدخول التالي.`
+      );
+      setResetUserId(null);
+      setResetTempPassword('');
+      await loadUsers();
+    } catch (err) {
+      setUserError(err instanceof Error ? err.message : 'تعذر إعادة تعيين كلمة المرور');
+    } finally {
+      setResetSaving(false);
     }
   };
 
@@ -302,6 +382,15 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
         >
           <Users className="w-3.5 h-3.5" />
           <span>المستخدمون والصلاحيات</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('supabase')}
+          className={`inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap cursor-pointer ${
+            activeTab === 'supabase' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          <Cloud className="w-3.5 h-3.5" />
+          <span>ربط Supabase و SQL</span>
         </button>
         <button
           onClick={() => setActiveTab('export')}
@@ -619,7 +708,9 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
           {/* Create User Form */}
           <div className="bg-white border border-slate-200 rounded-xl p-5">
             <h3 className="text-sm font-bold text-slate-900 mb-1">إضافة مستخدم جديد</h3>
-            <p className="text-xs text-slate-500 mb-4">تُحفظ كلمات المرور مشفرة عبر scrypt على الخادم</p>
+            <p className="text-xs text-slate-500 mb-4">
+              تُحفظ كلمات المرور مشفرة تلقائياً، مع إلزام المستخدم بتعيين كلمة مرور دائمة عند أول دخول.
+            </p>
 
             {userError && (
               <div className="mb-3 p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-800">
@@ -701,18 +792,69 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
               )}
 
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">كلمة المرور الأولية (8 أحرف+)</label>
-                <input
-                  type="password"
-                  required
-                  minLength={8}
-                  dir="ltr"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg text-left"
-                />
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-semibold text-slate-700">كلمة المرور المبدئية (8 أحرف+)</label>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const gen = generateTempPassword();
+                        setNewPassword(gen);
+                        setShowNewPassword(true);
+                      }}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold text-teal-800 bg-teal-50 border border-teal-200 rounded hover:bg-teal-100 cursor-pointer"
+                    >
+                      <Wand2 className="w-3 h-3" />
+                      <span>توليد</span>
+                    </button>
+                    {newPassword && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(newPassword).then(() => {
+                            setCopiedNewPw(true);
+                            setTimeout(() => setCopiedNewPw(false), 2000);
+                          }).catch(() => {});
+                        }}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold text-slate-700 bg-slate-100 border border-slate-200 rounded hover:bg-slate-200 cursor-pointer"
+                      >
+                        {copiedNewPw ? <Check className="w-3 h-3 text-emerald-700" /> : <Copy className="w-3 h-3" />}
+                        <span>{copiedNewPw ? 'نُسخت' : 'نسخ'}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="relative">
+                  <input
+                    type={showNewPassword ? 'text' : 'password'}
+                    required
+                    minLength={8}
+                    dir="ltr"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full pl-9 pr-3 py-2 text-xs border border-slate-300 rounded-lg text-left"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPassword((v) => !v)}
+                    className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                    aria-label="إظهار أو إخفاء كلمة المرور"
+                  >
+                    {showNewPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
               </div>
+
+              <label className="flex items-start gap-2 text-xs text-slate-700 cursor-pointer pt-1">
+                <input
+                  type="checkbox"
+                  checked={newMustChangePassword}
+                  onChange={(e) => setNewMustChangePassword(e.target.checked)}
+                  className="mt-0.5 rounded border-slate-300 text-teal-700 focus:ring-teal-600"
+                />
+                <span>إلزام المستخدم بتغيير كلمة المرور عند أول دخول (must_change_password)</span>
+              </label>
 
               <button
                 type="submit"
@@ -762,23 +904,33 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
                               : (Array.isArray(u.allowedSectors) ? u.allowedSectors.join(' · ') : '') || 'لا يوجد'}
                           </td>
                           <td className="py-3 px-4">
-                            <button
-                              onClick={() => handleToggleUserActive(u)}
-                              disabled={u.id === currentUser.id}
-                              className={`font-semibold cursor-pointer disabled:opacity-50 ${
-                                u.isActive ? 'text-emerald-700' : 'text-rose-700'
-                              }`}
-                            >
-                              {u.isActive ? 'مفعل' : 'موقوف'}
-                            </button>
+                            <div className="space-y-1">
+                              <button
+                                onClick={() => handleToggleUserActive(u)}
+                                disabled={u.id === currentUser.id}
+                                className={`font-semibold cursor-pointer disabled:opacity-50 ${
+                                  u.isActive ? 'text-emerald-700' : 'text-rose-700'
+                                }`}
+                              >
+                                {u.isActive ? 'مفعل' : 'موقوف'}
+                              </button>
+                              <div className="text-[11px] font-medium">
+                                {u.mustChangePassword ? (
+                                  <span className="text-amber-700">بانتظار تغيير كلمة المرور</span>
+                                ) : (
+                                  <span className="text-slate-500">كلمة مرور دائمة</span>
+                                )}
+                              </div>
+                            </div>
                           </td>
                           <td className="py-3 px-4">
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center gap-1.5">
                               <button
                                 onClick={() => {
                                   if (editingUserId === u.id) {
                                     setEditingUserId(null);
                                   } else {
+                                    setResetUserId(null);
                                     setEditingUserId(u.id);
                                     setEditFullName(u.fullName);
                                     setEditRole(u.role);
@@ -793,7 +945,22 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
                                 className="inline-flex items-center gap-1 px-2.5 py-1 border border-slate-300 rounded text-slate-700 hover:bg-slate-50 cursor-pointer whitespace-nowrap"
                               >
                                 <KeyRound className="w-3 h-3" />
-                                <span>تعديل / كلمة مرور</span>
+                                <span>تعديل الصلاحيات</span>
+                              </button>
+                              <button
+                                onClick={() => {
+                                  if (resetUserId === u.id) {
+                                    setResetUserId(null);
+                                  } else {
+                                    setEditingUserId(null);
+                                    setResetUserId(u.id);
+                                    setResetTempPassword(generateTempPassword());
+                                  }
+                                }}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 border border-amber-300 bg-amber-50/70 rounded text-amber-900 hover:bg-amber-100 cursor-pointer whitespace-nowrap"
+                              >
+                                <RotateCcw className="w-3 h-3" />
+                                <span>إعادة تعيين كلمة المرور</span>
                               </button>
                               {u.id !== currentUser.id && (
                                 <button
@@ -807,6 +974,50 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
                             </div>
                           </td>
                         </tr>
+                        {resetUserId === u.id && (
+                          <tr className="bg-amber-50/50">
+                            <td colSpan={5} className="p-4 border-t border-amber-100">
+                              <div className="flex flex-wrap items-end gap-3">
+                                <div>
+                                  <label className="block text-[11px] font-semibold text-amber-950 mb-1">
+                                    كلمة المرور المبدئية الجديدة للمستخدم «{u.fullName}» (8 أحرف+)
+                                  </label>
+                                  <input
+                                    type="text"
+                                    dir="ltr"
+                                    value={resetTempPassword}
+                                    onChange={(e) => setResetTempPassword(e.target.value)}
+                                    className="px-3 py-1.5 text-xs font-num border border-amber-300 rounded bg-white text-left min-w-[210px]"
+                                  />
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => setResetTempPassword(generateTempPassword())}
+                                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold border border-slate-300 bg-white rounded hover:bg-slate-50 cursor-pointer"
+                                >
+                                  <Wand2 className="w-3.5 h-3.5" />
+                                  <span>توليد جديدة</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => navigator.clipboard.writeText(resetTempPassword).catch(() => {})}
+                                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold border border-slate-300 bg-white rounded hover:bg-slate-50 cursor-pointer"
+                                >
+                                  <Copy className="w-3.5 h-3.5" />
+                                  <span>نسخ</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={resetSaving}
+                                  onClick={() => handleResetUserPassword(u)}
+                                  className="px-4 py-1.5 bg-amber-700 hover:bg-amber-800 text-white text-xs font-semibold rounded cursor-pointer disabled:opacity-50"
+                                >
+                                  {resetSaving ? 'جاري التعيين...' : 'حفظ وإلزام بالتغيير عند الدخول التالي'}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
                         {editingUserId === u.id && (
                           <tr className="bg-slate-50">
                             <td colSpan={5} className="p-4">
@@ -848,7 +1059,7 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
                                   </div>
                                 )}
                                 <div>
-                                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">كلمة مرور جديدة (اختياري)</label>
+                                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">كلمة مرور دائمة (اختياري)</label>
                                   <input
                                     type="password"
                                     dir="ltr"
@@ -874,6 +1085,104 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
                 </tbody>
               </table>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 4: SUPABASE CLOUD DATABASE SETUP & SQL */}
+      {activeTab === 'supabase' && (
+        <div className="space-y-6 max-w-5xl">
+          <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">حالة الربط مع قاعدة بيانات Supabase السحابية</h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  مشاركة المستخدمين وكلمات المرور وبيانات ملفات Excel وأهداف الفئات والمسابقات بين جميع الأجهزة على Vercel.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={loadSupabaseStatus}
+                disabled={sbLoading}
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold border border-slate-300 rounded-lg text-slate-700 hover:bg-slate-50 cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${sbLoading ? 'animate-spin' : ''}`} />
+                <span>اختبار الاتصال بـ Supabase</span>
+              </button>
+            </div>
+
+            {sbStatus && (
+              <div
+                className={`p-4 rounded-xl border text-xs flex items-start gap-3 ${
+                  sbStatus.ok
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-950'
+                    : sbStatus.configured
+                      ? 'bg-amber-50 border-amber-200 text-amber-950'
+                      : 'bg-slate-50 border-slate-200 text-slate-800'
+                }`}
+              >
+                {sbStatus.ok ? (
+                  <CheckCircle2 className="w-5 h-5 text-emerald-700 shrink-0 mt-0.5" />
+                ) : (
+                  <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+                )}
+                <div className="space-y-1">
+                  <div className="font-bold">
+                    {sbStatus.ok
+                      ? 'متصل بنجاح بـ Supabase السحابية'
+                      : sbStatus.configured
+                        ? 'متغيرات البيئة مضبوطة ولكن يتطلب تشغيل كود SQL'
+                        : 'وضع التخزين المحلي (لم يتم ربط Supabase بعد)'}
+                  </div>
+                  <p className="leading-relaxed">{sbStatus.message}</p>
+                </div>
+              </div>
+            )}
+
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs text-slate-700 space-y-2">
+              <div className="font-bold text-slate-900">خطوات الربط السحابي على Vercel و Supabase:</div>
+              <ol className="list-decimal list-inside space-y-1.5 leading-relaxed">
+                <li>أنشئ مشروعاً جديداً على <span className="font-semibold">Supabase.com</span>.</li>
+                <li>افتح <span className="font-semibold">SQL Editor</span> في لوحة Supabase، والصق كود SQL أدناه ثم اضغط <span className="font-semibold">Run</span> لإنشاء كافة الجداول.</li>
+                <li>من <span className="font-semibold">Project Settings → API</span> انسخ القيم التالية فقط وأضفها في <span className="font-semibold">Vercel Environment Variables</span>:
+                  <div className="mt-1.5 grid grid-cols-1 md:grid-cols-2 gap-2 font-num" dir="ltr">
+                    <div className="bg-white border border-slate-200 rounded px-3 py-1.5">VITE_SUPABASE_URL</div>
+                    <div className="bg-white border border-slate-200 rounded px-3 py-1.5">VITE_SUPABASE_ANON_KEY</div>
+                  </div>
+                </li>
+                <li>أعد نشر المشروع (<span className="font-semibold">Redeploy</span>) على Vercel ليبدأ المزامنة الفورية بين جميع الأجهزة.</li>
+              </ol>
+            </div>
+          </div>
+
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <div className="p-4 border-b border-slate-200 flex items-center justify-between gap-4">
+              <div>
+                <h4 className="text-sm font-bold text-slate-900">كود إنشاء جداول Supabase (supabase/schema.sql)</h4>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  يشمل جداول المستخدمين (app_users)، الدفعات، القطاعات، الفروع، المبيعات، أهداف الفئات، المسابقات، وسجل المراجع الذكي.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard.writeText(SUPABASE_SCHEMA_SQL).then(() => {
+                    setCopiedSql(true);
+                    setTimeout(() => setCopiedSql(false), 2500);
+                  }).catch(() => {});
+                }}
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold rounded-lg cursor-pointer shrink-0"
+              >
+                {copiedSql ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedSql ? 'تم نسخ كود SQL!' : 'نسخ كود SQL'}</span>
+              </button>
+            </div>
+            <pre
+              dir="ltr"
+              className="p-4 bg-slate-950 text-slate-100 text-[11px] font-mono overflow-x-auto max-h-[420px] leading-relaxed text-left"
+            >
+              {SUPABASE_SCHEMA_SQL}
+            </pre>
           </div>
         </div>
       )}

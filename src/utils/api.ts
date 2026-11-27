@@ -1,5 +1,6 @@
 import { revokeClientSessionToken } from './client-auth.ts';
 import { ClientHttpError, handleClientApiRequest, handleClientDownload } from './client-api.ts';
+import { isSupabaseConfigured } from './supabase-sync.ts';
 
 let authToken: string | null = null;
 let onUnauthorizedCallback: (() => void) | null = null;
@@ -24,6 +25,10 @@ export function setOnUnauthorized(cb: (() => void) | null) {
 }
 
 async function resolveExecutionMode(): Promise<ApiExecutionMode> {
+  if (isSupabaseConfigured()) {
+    detectedMode = 'client';
+    return 'client';
+  }
   if (detectedMode) return detectedMode;
   if (detectPromise) return detectPromise;
 
