@@ -1162,7 +1162,8 @@ export function getBranchesAnalytics(
     const batchFb = batchBranchChainFallback.get(b.branch_code);
     const sales = s?.sales ?? 0;
     const tax = s?.tax ?? 0;
-    const target = Number(b.branch_target) || 0;
+    const rawTarget = Number(b.branch_target);
+    const target = Number.isFinite(rawTarget) && rawTarget > 0 ? rawTarget : 0;
 
     const hasStoredChain = Boolean(b.chain_code.trim() || b.chain_name.trim());
     const chainDef = resolveChainForBranch(
@@ -1174,8 +1175,9 @@ export function getBranchesAnalytics(
       hasStoredChain ? undefined : s?.payerCode || batchFb?.payerCode,
       hasStoredChain ? undefined : s?.chainName || batchFb?.chainName
     );
-    const assignedRepCode = normalizeCode(b.rep_code);
-    const assignedRepDef = assignedRepCode ? resolveRepDef(assignedRepCode) : undefined;
+    const rawAssignedRepCode = normalizeCode(b.rep_code);
+    const assignedRepDef = rawAssignedRepCode ? resolveRepDef(rawAssignedRepCode) : undefined;
+    const assignedRepCode = assignedRepDef ? normalizeCode(assignedRepDef.rep_code) : rawAssignedRepCode;
     const assignedRepName = (b.rep_name || assignedRepDef?.rep_name || assignedRepCode || '').trim();
 
     // Always prefer `كود الادارة` / `اسم الادارة` recorded per branch in `تعريف الفروع و الاهداف`
@@ -1486,6 +1488,7 @@ export function getRepsAnalytics(
         branch_code,
         COALESCE(branch_name, '') AS branch_name,
         COALESCE(rep_code, '') AS rep_code,
+        COALESCE(rep_name, '') AS rep_name,
         sector_name,
         branch_target,
         COALESCE(supervisor_name, '') AS supervisor_name
@@ -1496,14 +1499,15 @@ export function getRepsAnalytics(
     branch_code: string;
     branch_name: string;
     rep_code: string;
+    rep_name: string;
     sector_name: string;
     branch_target: number;
     supervisor_name: string;
   }>;
 
   interface RepBranchMeta {
+    repName: string;
     target: number;
-    seenBranchCodes: Set<string>;
     branchGroups: Map<string, { target: number }>;
     targetBranchKeys: Set<string>;
     supervisors: Set<string>;
@@ -1511,12 +1515,18 @@ export function getRepsAnalytics(
   }
   const repBranchMetaMap = new Map<string, RepBranchMeta>();
   const repBranchMetaTrimmedMap = new Map<string, RepBranchMeta>();
+  const seenExactBranchCodes = new Set<string>();
 
   if (selectedSector !== 'UNLINKED') {
     for (const b of branchRows) {
-      const sec = canonicalizeSectorName(b.sector_name || '');
+      const sec = canonicalizeSectorName(b.sector_name || 'التوريد المباشر');
       if (user.role !== 'admin' && !scope.authorizedSectors.includes(sec)) continue;
       if (selectedSector !== 'ALL' && sec !== selectedSector) continue;
+
+      // Preserve leading zeros in branch_code and deduplicate exact branch code rows globally (matching getBranchesAnalytics)
+      const normBranchCode = normalizeCode(b.branch_code) || String(b.branch_code ?? '').trim();
+      if (!normBranchCode || seenExactBranchCodes.has(normBranchCode)) continue;
+      seenExactBranchCodes.add(normBranchCode);
 
       const normRep = normalizeCode(b.rep_code);
       if (!normRep) continue;
@@ -1527,8 +1537,8 @@ export function getRepsAnalytics(
       let meta = repBranchMetaMap.get(canonicalRepKey);
       if (!meta) {
         meta = {
+          repName: (defMatch?.rep_name || b.rep_name || canonicalRepKey).trim(),
           target: 0,
-          seenBranchCodes: new Set(),
           branchGroups: new Map(),
           targetBranchKeys: new Set(),
           supervisors: new Set(),
@@ -1540,13 +1550,10 @@ export function getRepsAnalytics(
         }
       }
 
-      // Preserve leading zeros in branch_code and ignore exact duplicate code rows for same rep
-      const normBranchCode = normalizeCode(b.branch_code) || String(b.branch_code ?? '').trim();
-      if (!normBranchCode || meta.seenBranchCodes.has(normBranchCode)) continue;
-      meta.seenBranchCodes.add(normBranchCode);
-
-      const normBranchName = normalizeArabic(b.branch_name);
-      const normSup = normalizeArabic(b.supervisor_name);
+      const cleanBranchName = (b.branch_name || '').trim() || normBranchCode;
+      const normBranchName = normalizeArabic(cleanBranchName);
+      const supervisorLabel = b.supervisor_name.trim() || 'غير محدد';
+      const normSup = normalizeArabic(supervisorLabel);
       const groupKey = normBranchName
         ? `${sec}::${normSup}::${normBranchName}`
         : `code::${normBranchCode}`;
@@ -1696,6 +1703,23 @@ export function getRepsAnalytics(
         recordCount: 0,
         returnCount: 0,
         branchCount: branchMeta ? branchMeta.targetBranchKeys.size : 0,
+      });
+    }
+
+    for (const [key, branchMeta] of repBranchMetaMap.entries()) {
+      if (repBuckets.has(key) || branchMeta.target <= 0) continue;
+      const branchSup = branchMeta.supervisors.size > 0 ? Array.from(branchMeta.supervisors).join('، ') : '-';
+      repBuckets.set(key, {
+        repCode: key,
+        repName: branchMeta.repName || key,
+        sectorName: Array.from(branchMeta.sectors)[0] || 'غير محدد',
+        supervisorName: branchSup,
+        sales: 0,
+        tax: 0,
+        target: branchMeta.target,
+        recordCount: 0,
+        returnCount: 0,
+        branchCount: branchMeta.targetBranchKeys.size,
       });
     }
   }

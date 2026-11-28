@@ -1848,6 +1848,70 @@ function runTests() {
   assert.equal(dedupBranchesRes.diagnostics.consolidatedDuplicateNameCount, 2);
   assert.ok(dedupBranchesRes.diagnostics.repDiscrepancies.some((d) => d.repCode === '103209' && d.extraCount === 1));
 
+  // Verify exact parity between sum(getRepsAnalytics.branchCount) and getBranchesAnalytics.diagnostics.totalTargetedAssignedBranches
+  const dedupRepsSum = dedupReps.reduce((acc, r) => acc + r.branchCount, 0);
+  assert.equal(
+    dedupRepsSum,
+    dedupBranchesRes.diagnostics.totalTargetedAssignedBranches,
+    'Sum of getRepsAnalytics branchCount must exactly match totalTargetedAssignedBranches'
+  );
+  // Even though rep 103209 had a cross-rep VF05N invoice (differenceCount === 1), Smart Audit must NOT falsely raise BRANCH_REP_COUNT_DIFF
+  const dedupAudit = runSmartAudit(db, adminUser);
+  assert.ok(
+    !dedupAudit.findings.some((f) => f.code === 'BRANCH_REP_COUNT_DIFF'),
+    'Smart Audit must not flag prevented cross-rep invoices when getBranchesAnalytics and getRepsAnalytics agree'
+  );
+
+  // Edge case: rep_code with leading zeros in branches vs sales_reps + empty vs 'غير محدد' supervisor + rep absent from sales_reps with 0 sales
+  const edgeRepDb = createSeededTestDb();
+  const edgeRepWb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(edgeRepWb, XLSX.utils.aoa_to_sheet([['كود القطاع', 'القطاع'], ['S1', 'التوريد المباشر']]), 'القطاعات');
+  XLSX.utils.book_append_sheet(edgeRepWb, XLSX.utils.aoa_to_sheet([['القطاع', 'الهدف'], ['التوريد المباشر', 200000]]), 'اهداف القطاعات');
+  XLSX.utils.book_append_sheet(
+    edgeRepWb,
+    XLSX.utils.aoa_to_sheet([['كود السلسلة', 'اسم السلسلة', 'الادارة', 'اسم المشرف', 'القطاع'], ['0010', 'سلسلة', 'ادارة', 'مشرف', 'التوريد المباشر']]),
+    'تعريف الادارات والقطاعات'
+  );
+  XLSX.utils.book_append_sheet(
+    edgeRepWb,
+    XLSX.utils.aoa_to_sheet([
+      ['القطاع', 'كود الفرع', 'اسم الفرع', 'كود الادارة', 'اسم الادارة', 'كود المندوب', 'اسم المندوب', 'اسم المشرف', 'إجمالى الهدف'],
+      ['التوريد المباشر', '000901', 'فرع التوحيد', '0010', 'سلسلة', '00103309', 'معاز محمود', '', 25000],
+      ['التوريد المباشر', '000902', 'فرع التوحيد', '0010', 'سلسلة', '103309', 'معاز محمود', 'غير محدد', 15000],
+      // Rep '009999' is NOT in sales_reps and has 0 sales, yet has a targeted branch -> must still align between getBranchesAnalytics & getRepsAnalytics
+      ['التوريد المباشر', '000903', 'فرع جديد', '0010', 'سلسلة', '009999', 'مندوب غير مدرج', 'مشرف', 30000],
+    ]),
+    'تعريف الفروع و الاهداف'
+  );
+  XLSX.utils.book_append_sheet(
+    edgeRepWb,
+    XLSX.utils.aoa_to_sheet([['كود المندوب', 'اسم المندوب', 'القطاع'], ['103309', 'معاز محمود', 'التوريد المباشر']]),
+    'تعريف مندوبى البيع'
+  );
+  XLSX.utils.book_append_sheet(edgeRepWb, XLSX.utils.aoa_to_sheet([['كود الصنف', 'اسم الصنف', 'التصنيف A'], ['M1', 'صنف', 'تجارى']]), 'تعريف الاصناف');
+  XLSX.utils.book_append_sheet(edgeRepWb, XLSX.utils.aoa_to_sheet([['اسم المستخدم', 'الصلاحيات'], ['u1', 'الكل']]), 'تعريف المستخدمين');
+  XLSX.utils.book_append_sheet(
+    edgeRepWb,
+    XLSX.utils.aoa_to_sheet([['Sold-to Party', 'Payer', 'Billing Date', 'Sales Employee Code', 'New Total Tax', 'New Growth Value BD&T'], ['000901', '0010', '2026-11-22', '103309', 140, 10000]]),
+    'VF05N (2)'
+  );
+  XLSX.utils.book_append_sheet(
+    edgeRepWb,
+    XLSX.utils.aoa_to_sheet([['Billing Dt.', 'Customer', 'Material', 'Sales Emp.', 'Qty', 'Total Tax', 'New Growth Value BD&T'], [46348, '0010', 'M1', '103309', 10, 140, 10000]]),
+    'Zsales_Price (2)'
+  );
+  const edgeRepReport = validateExcelBuffer(XLSX.write(edgeRepWb, { type: 'buffer', bookType: 'xlsx' }) as Buffer, 'Edge_Rep_Branches.xlsx');
+  assert.equal(edgeRepReport.canCommit, true);
+  commitValidatedImport(edgeRepDb, edgeRepReport.validationToken, { id: 1, fullName: 'مدير النظام' });
+  const edgeBranchesRes = getBranchesAnalytics(edgeRepDb, adminUser, { source: 'VF05N' });
+  const edgeRepsRes = getRepsAnalytics(edgeRepDb, adminUser, { source: 'VF05N' });
+  assert.equal(edgeBranchesRes.diagnostics.totalTargetedAssignedBranches, 2);
+  assert.equal(edgeRepsRes.reduce((s, r) => s + r.branchCount, 0), 2);
+  assert.equal(edgeRepsRes.find((r) => r.repCode === '103309')?.branchCount, 1);
+  assert.equal(edgeRepsRes.find((r) => r.repCode === '103309')?.target, 40000);
+  assert.equal(edgeRepsRes.find((r) => r.repCode === '009999')?.branchCount, 1);
+  assert.equal(runSmartAudit(edgeRepDb, adminUser).findings.some((f) => f.code === 'BRANCH_REP_COUNT_DIFF'), false);
+
   // =========================================================================
   // 19. Unified Sector Sales & Tax Totals Across ALL Job Titles (`مندوب` / `مشرف` / `مدير قطاع`)
   //     Even when geographical chain supervisors in `departments_chains` sell ALL categories or omit a category-only supervisor!

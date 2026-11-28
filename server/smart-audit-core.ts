@@ -537,25 +537,28 @@ export function runSmartAudit(
     }
 
     const branchDiag = getBranchesAnalytics(db, adminUser, { source: 'VF05N', sector: 'ALL' }).diagnostics;
-    if (branchDiag.differenceCount !== 0) {
+    const repsAuditList = getRepsAnalytics(db, adminUser, { source: 'VF05N', sector: 'ALL' });
+    const actualRepsBranchCount = repsAuditList.reduce((acc, r) => acc + Math.trunc(r.branchCount || 0), 0);
+    const actualBranchRepDiff = actualRepsBranchCount - branchDiag.totalTargetedAssignedBranches;
+    if (actualBranchRepDiff !== 0) {
       consistencyIssueCount++;
       findings.push({
         id: 'BRANCH_REP_COUNT_DIFF',
         code: 'BRANCH_REP_COUNT_DIFF',
         title: 'فرق في إجمالي عدد الفروع بين حساب الفروع وحساب المناديب',
-        description: `يوجد فرق بمقدار ${branchDiag.differenceCount} فرع بين إجمالي الفروع المنسوبة والمناديب.`,
+        description: `يوجد فرق بمقدار ${actualBranchRepDiff} فرع بين إجمالي الفروع المنسوبة والمناديب.`,
         severity: 'medium',
         category: 'data_consistency',
         fixType: 'code_fix_required',
         affectedArea: 'الفروع وجهاز البيع',
         details: [
           `المتوقع على المناديب: ${branchDiag.totalTargetedAssignedBranches}`,
-          `المحسوب في الفروع: ${branchDiag.previousInflatedCountInBranchesView}`,
-          `الفرق: ${branchDiag.differenceCount}`,
+          `المحسوب في جهاز البيع: ${actualRepsBranchCount}`,
+          `الفرق: ${actualBranchRepDiff}`,
         ],
         readyPrompt: [
           'راجع منطق تجميع الفروع الفريدة لكل مندوب في server/analytics-engine.ts (getBranchesAnalytics / getRepsAnalytics):',
-          `- الفرق المرصود: ${branchDiag.differenceCount} فرع`,
+          `- الفرق المرصود: ${actualBranchRepDiff} فرع`,
           '- تحقّق من تفرّد كود الفرع واسم الفرع بعد التطبيع والحفاظ على الأصفار البادئة ومنع احتساب فروع مندوب آخر.',
         ].join('\n'),
       });
