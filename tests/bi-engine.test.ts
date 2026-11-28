@@ -3208,7 +3208,175 @@ function runTests() {
   assert.ok(SUPABASE_SCHEMA_SQL.includes('CREATE TABLE IF NOT EXISTS public.app_settings'));
   assert.ok(SUPABASE_SCHEMA_SQL.includes("NOTIFY pgrst, 'reload schema';"));
 
-  console.log('All Sales BI Engine tests PASSED (26/26 assertion groups verified).');
+  // =========================================================================
+  // 27. Cross-Sector Rep Sales Visibility with Zeroed Target in Foreign Sector
+  // =========================================================================
+  const crossSecDb = createSeededTestDb();
+  const crossSecWb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(
+    crossSecWb,
+    XLSX.utils.aoa_to_sheet([
+      ['كود القطاع', 'القطاع'],
+      ['S1', 'التوريد المباشر'],
+      ['S2', 'التوريد المركزي'],
+    ]),
+    'القطاعات'
+  );
+  XLSX.utils.book_append_sheet(
+    crossSecWb,
+    XLSX.utils.aoa_to_sheet([
+      ['القطاع', 'الهدف'],
+      ['التوريد المباشر', 200000],
+      ['التوريد المركزي', 300000],
+    ]),
+    'اهداف القطاعات'
+  );
+  XLSX.utils.book_append_sheet(
+    crossSecWb,
+    XLSX.utils.aoa_to_sheet([
+      ['كود السلسلة', 'اسم السلسلة', 'الادارة', 'اسم المشرف', 'القطاع'],
+      ['0064000031', 'سلسلة مباشر', 'ادارة مباشر', 'مشرف مباشر', 'التوريد المباشر'],
+      ['0064000032', 'سلسلة مركزي', 'ادارة مركزي', 'مشرف مركزي', 'التوريد المركزي'],
+    ]),
+    'تعريف الادارات والقطاعات'
+  );
+  XLSX.utils.book_append_sheet(
+    crossSecWb,
+    XLSX.utils.aoa_to_sheet([
+      ['القطاع', 'كود الفرع', 'اسم الفرع', 'كود الادارة', 'اسم الادارة', 'كود المندوب', 'اسم المندوب', 'اسم المشرف', 'إجمالى الهدف'],
+      ['التوريد المباشر', '0064000911', 'فرع مباشر 1', '0064000031', 'سلسلة مباشر', '601', 'مندوب مباشر', 'مشرف مباشر', 100000],
+      ['التوريد المركزي', '0064000912', 'فرع مركزي 1', '0064000032', 'سلسلة مركزي', '602', 'مندوب مركزي', 'مشرف مركزي', 150000],
+      // Branch rep '603' not listed in sales_reps -> home sector must still resolve from branches ('التوريد المركزي')
+      ['التوريد المركزي', '0064000913', 'فرع مركزي 2', '0064000032', 'سلسلة مركزي', '603', 'مندوب فرع فقط', 'مشرف مركزي', 80000],
+    ]),
+    'تعريف الفروع و الاهداف'
+  );
+  XLSX.utils.book_append_sheet(
+    crossSecWb,
+    XLSX.utils.aoa_to_sheet([
+      ['كود المندوب', 'اسم المندوب', 'القطاع', 'الهدف'],
+      ['601', 'مندوب مباشر', 'التوريد المباشر', 0],
+      ['602', 'مندوب مركزي', 'التوريد المركزي', 0],
+    ]),
+    'تعريف مندوبى البيع'
+  );
+  XLSX.utils.book_append_sheet(
+    crossSecWb,
+    XLSX.utils.aoa_to_sheet([
+      ['كود الصنف', 'اسم الصنف', 'التصنيف A'],
+      ['ITM-C1', 'صنف 1', 'تجارى'],
+    ]),
+    'تعريف الاصناف'
+  );
+  XLSX.utils.book_append_sheet(
+    crossSecWb,
+    XLSX.utils.aoa_to_sheet([['اسم المستخدم', 'الصلاحيات'], ['u1', 'الكل']]),
+    'تعريف المستخدمين'
+  );
+  XLSX.utils.book_append_sheet(
+    crossSecWb,
+    XLSX.utils.aoa_to_sheet([
+      ['Sold-to Party', 'Payer', 'Billing Date', 'Material', 'Sales Employee Code', 'New Total Tax', 'New Growth Value BD&T', 'New Net Value BT'],
+      // 601 sells in Direct
+      ['0064000911', '0064000031', '2026-11-10', 'ITM-C1', '601', 100, 30000, 25000],
+      // 602 (Central rep) records cross-sector sales + return in Direct (on Direct branch) AND sales in Central
+      ['0064000911', '0064000031', '2026-11-11', 'ITM-C1', '602', 50, 12000, 10000],
+      ['0064000911', '0064000031', '2026-11-12', 'ITM-C1', '602', -10, -2000, -1700],
+      ['0064000912', '0064000032', '2026-11-12', 'ITM-C1', '602', 200, 50000, 42000],
+      // 603 (Central branch-only rep, absent from sales_reps) records cross-sector sales in Direct
+      ['0064000911', '0064000031', '2026-11-13', 'ITM-C1', '603', 30, 5000, 4000],
+    ]),
+    'VF05N (2)'
+  );
+  XLSX.utils.book_append_sheet(
+    crossSecWb,
+    XLSX.utils.aoa_to_sheet([
+      ['Billing Dt.', 'Customer', 'Material', 'Sales Emp.', 'Qty', 'Total Tax', 'New Growth Value BD&T', 'Net Value Without TA'],
+      ['10.11.2026', '0064000031', 'ITM-C1', '601', 10, 100, 30000, 25000],
+    ]),
+    'Zsales_Price (2)'
+  );
+  const crossSecReport = validateExcelBuffer(XLSX.write(crossSecWb, { type: 'buffer', bookType: 'xlsx' }) as Buffer, 'Cross_Sector_Reps.xlsx');
+  assert.equal(crossSecReport.canCommit, true);
+  commitValidatedImport(crossSecDb, crossSecReport.validationToken, { id: 1, fullName: 'مدير النظام' });
+
+  // Save manual targets for 601 (Direct), 602 (Central), 603 (Central)
+  saveRepManualTargets(
+    crossSecDb,
+    [
+      { repCode: '601', repName: 'مندوب مباشر', sectorName: 'التوريد المباشر', targetValue: 115000 },
+      { repCode: '602', repName: 'مندوب مركزي', sectorName: 'التوريد المركزي', targetValue: 180000 },
+      { repCode: '603', repName: 'مندوب فرع فقط', sectorName: 'التوريد المركزي', targetValue: 90000 },
+    ],
+    adminUser
+  );
+
+  // 1) Selecting 'التوريد المباشر' in AUTO mode:
+  const directAuto = getRepsAnalytics(crossSecDb, adminUser, { source: 'VF05N', sector: 'التوريد المباشر', targetMode: 'auto' });
+  const r601DirectAuto = directAuto.find((r) => r.repCode === '601')!;
+  const r602DirectAuto = directAuto.find((r) => r.repCode === '602')!;
+  const r603DirectAuto = directAuto.find((r) => r.repCode === '603')!;
+  assert.ok(r602DirectAuto, 'Cross-sector rep 602 must appear in Direct sector tab when having sales there');
+  assert.equal(r602DirectAuto.sales, 10000); // 12000 - 2000 in Direct ONLY
+  assert.equal(r602DirectAuto.tax, 40); // 50 - 10 in Direct ONLY
+  assert.equal(r602DirectAuto.recordCount, 2);
+  assert.equal(r602DirectAuto.returnCount, 1);
+  assert.equal(r602DirectAuto.target, 0, 'External rep 602 must have target=0 in Direct sector (auto mode)');
+  assert.equal(r602DirectAuto.autoTarget, 0);
+  assert.equal(r602DirectAuto.achievementPct, null);
+  assert.equal(r602DirectAuto.isExternalSector, true);
+  assert.equal(r603DirectAuto.target, 0, 'Branch-only external rep 603 must also have target=0 in Direct sector');
+  assert.equal(r603DirectAuto.isExternalSector, true);
+  assert.equal(r601DirectAuto.target, 100000);
+  assert.equal(r601DirectAuto.isExternalSector, false);
+  // Sector total target in Direct must ONLY include 601 (100,000), never 602 or 603
+  assert.equal(directAuto.reduce((s, r) => s + r.target, 0), 100000);
+
+  // 2) Selecting 'التوريد المباشر' in MANUAL mode:
+  const directManual = getRepsAnalytics(crossSecDb, adminUser, { source: 'VF05N', sector: 'التوريد المباشر', targetMode: 'manual' });
+  const r602DirectManual = directManual.find((r) => r.repCode === '602')!;
+  const r603DirectManual = directManual.find((r) => r.repCode === '603')!;
+  const r601DirectManual = directManual.find((r) => r.repCode === '601')!;
+  assert.equal(r602DirectManual.sales, 10000);
+  assert.equal(r602DirectManual.target, 0, 'External rep 602 must have target=0 in Direct sector (manual mode too)');
+  assert.equal(r602DirectManual.manualTarget, null);
+  assert.equal(r602DirectManual.isExternalSector, true);
+  assert.equal(r603DirectManual.target, 0);
+  assert.equal(r601DirectManual.target, 115000);
+  assert.equal(directManual.reduce((s, r) => s + r.target, 0), 115000);
+
+  // 3) Selecting rep's home sector 'التوريد المركزي':
+  const centralAuto = getRepsAnalytics(crossSecDb, adminUser, { source: 'VF05N', sector: 'التوريد المركزي', targetMode: 'auto' });
+  const r602CentralAuto = centralAuto.find((r) => r.repCode === '602')!;
+  const r603CentralAuto = centralAuto.find((r) => r.repCode === '603')!;
+  assert.equal(r602CentralAuto.sales, 50000);
+  assert.equal(r602CentralAuto.tax, 200);
+  assert.equal(r602CentralAuto.target, 150000);
+  assert.equal(r602CentralAuto.isExternalSector, false);
+  assert.equal(r603CentralAuto.sales, 0);
+  assert.equal(r603CentralAuto.target, 80000);
+  assert.equal(centralAuto.reduce((s, r) => s + r.target, 0), 230000);
+
+  const centralManual = getRepsAnalytics(crossSecDb, adminUser, { source: 'VF05N', sector: 'التوريد المركزي', targetMode: 'manual' });
+  assert.equal(centralManual.find((r) => r.repCode === '602')!.target, 180000);
+  assert.equal(centralManual.find((r) => r.repCode === '603')!.target, 90000);
+  assert.equal(centralManual.reduce((s, r) => s + r.target, 0), 270000);
+
+  // 4) Selecting 'ALL' sectors: single row per rep, combined sales across sectors, full target without duplication
+  const allAuto = getRepsAnalytics(crossSecDb, adminUser, { source: 'VF05N', sector: 'ALL', targetMode: 'auto' });
+  assert.equal(allAuto.filter((r) => r.repCode === '602').length, 1, 'Rep 602 must not duplicate in ALL sectors view');
+  const r602AllAuto = allAuto.find((r) => r.repCode === '602')!;
+  assert.equal(r602AllAuto.sales, 60000); // 10000 + 50000
+  assert.equal(r602AllAuto.tax, 240); // 40 + 200
+  assert.equal(r602AllAuto.target, 150000);
+  assert.equal(r602AllAuto.isExternalSector, false);
+  assert.equal(allAuto.reduce((s, r) => s + r.target, 0), 330000); // 100000 + 150000 + 80000
+
+  const allManual = getRepsAnalytics(crossSecDb, adminUser, { source: 'VF05N', sector: 'ALL', targetMode: 'manual' });
+  assert.equal(allManual.find((r) => r.repCode === '602')!.target, 180000);
+  assert.equal(allManual.reduce((s, r) => s + r.target, 0), 385000); // 115000 + 180000 + 90000
+
+  console.log('All Sales BI Engine tests PASSED (27/27 assertion groups verified).');
 }
 
 runTests();

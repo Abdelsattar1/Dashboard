@@ -26,7 +26,7 @@ interface RepsViewProps {
   onRefresh: () => void;
 }
 
-type SortKey = 'sales' | 'tax' | 'target' | 'achievementPct' | 'recordCount' | 'branchCount';
+type SortKey = 'sales' | 'tax' | 'target' | 'achievementPct' | 'remainingToTarget' | 'branchCount';
 
 function formatRepAchievement(pct: number | null | undefined): string {
   if (pct === null || pct === undefined || !Number.isFinite(pct)) {
@@ -41,6 +41,52 @@ function computeRepAchievement(sales: number, target: number, tax: number): numb
   const pct = (sales / denom) * 100;
   if (!Number.isFinite(pct)) return null;
   return Number(pct.toFixed(2));
+}
+
+function computeRemainingToTarget(sales: number, target: number, thresholdPct: number): number {
+  const safeSales = Number.isFinite(sales) ? sales : 0;
+  const safeTarget = Number.isFinite(target) ? target : 0;
+  const safePct = Number.isFinite(thresholdPct) && thresholdPct >= 0 ? thresholdPct : 0;
+  const raw = safeSales - safeTarget * (safePct / 100);
+  if (!Number.isFinite(raw)) return 0;
+  const rounded = Number(raw.toFixed(2));
+  return Math.abs(rounded) < 0.005 ? 0 : rounded;
+}
+
+function renderRemainingValue(value: number, isTotal = false): React.ReactNode {
+  const safeVal = Number.isFinite(value) && Math.abs(value) >= 0.005 ? value : 0;
+  if (safeVal > 0) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 font-num tabular-nums font-semibold text-emerald-700"
+        dir="ltr"
+      >
+        <span aria-hidden="true">↑</span>
+        <span>{formatEGP(safeVal)}</span>
+      </span>
+    );
+  }
+  if (safeVal < 0) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 font-num tabular-nums font-semibold text-rose-600"
+        dir="ltr"
+      >
+        <span aria-hidden="true">↓</span>
+        <span>{formatEGP(safeVal)}</span>
+      </span>
+    );
+  }
+  return (
+    <span
+      className={`inline-flex items-center font-num tabular-nums ${
+        isTotal ? 'font-bold text-slate-700' : 'text-slate-600'
+      }`}
+      dir="ltr"
+    >
+      {formatEGP(0)}
+    </span>
+  );
 }
 
 export const RepsView: React.FC<RepsViewProps> = ({
@@ -60,6 +106,14 @@ export const RepsView: React.FC<RepsViewProps> = ({
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('sales');
   const [sortAsc, setSortAsc] = useState(false);
+  const [thresholdPctInput, setThresholdPctInput] = useState<string>('100');
+
+  const thresholdPct = useMemo(() => {
+    const trimmed = thresholdPctInput.trim();
+    if (trimmed === '') return 0;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 100;
+  }, [thresholdPctInput]);
 
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [savedManualOverrides, setSavedManualOverrides] = useState<Record<string, number>>({});
@@ -73,12 +127,22 @@ export const RepsView: React.FC<RepsViewProps> = ({
   draftsRef.current = drafts;
 
   useEffect(() => {
+    setSavedManualOverrides({});
+    setDrafts({});
+    setSaveMessage(null);
+    setSaveError(null);
+  }, [sectorFilter]);
+
+  useEffect(() => {
     // Sync server manual values when reps reload & clear stale drafts that match persisted value
     setSavedManualOverrides((prev) => {
-      const next = { ...prev };
+      const next: Record<string, number> = {};
       for (const r of reps) {
+        if (r.isExternalSector || r.repCode === 'غير محدد') continue;
         if (r.manualTarget !== null && r.manualTarget !== undefined) {
           next[r.repCode] = r.manualTarget;
+        } else if (Object.prototype.hasOwnProperty.call(prev, r.repCode)) {
+          next[r.repCode] = prev[r.repCode];
         }
       }
       return next;
@@ -87,7 +151,7 @@ export const RepsView: React.FC<RepsViewProps> = ({
       const next: Record<string, string> = {};
       for (const [code, raw] of Object.entries(prev)) {
         const rep = reps.find((r) => r.repCode === code);
-        if (!rep) continue;
+        if (!rep || rep.isExternalSector) continue;
         const parsed = raw.trim() === '' ? 0 : Number(raw.trim());
         const savedVal = rep.manualTarget ?? 0;
         if (Number.isFinite(parsed) && Number(parsed.toFixed(2)) === Number(savedVal.toFixed(2))) {
@@ -111,6 +175,7 @@ export const RepsView: React.FC<RepsViewProps> = ({
     (row: RepMetricRow): boolean => {
       if (!canEditTargets) return false;
       if (!row.repCode || row.repCode === 'غير محدد') return false;
+      if (row.isExternalSector) return false;
       if (isAdmin) return true;
       return Boolean(row.sectorName && authorizedSectors.includes(row.sectorName));
     },
@@ -119,6 +184,7 @@ export const RepsView: React.FC<RepsViewProps> = ({
 
   const getPersistedManualValue = useCallback(
     (row: RepMetricRow): number | null => {
+      if (row.isExternalSector || row.repCode === 'غير محدد') return null;
       if (Object.prototype.hasOwnProperty.call(savedManualOverrides, row.repCode)) {
         return savedManualOverrides[row.repCode];
       }
@@ -130,11 +196,14 @@ export const RepsView: React.FC<RepsViewProps> = ({
   const liveReps = useMemo(() => {
     return reps.map((r) => {
       const isUnlinked = r.repCode === 'غير محدد';
-      if (isUnlinked) {
+      if (isUnlinked || r.isExternalSector) {
         return {
           ...r,
+          autoTarget: 0,
+          manualTarget: null,
           target: 0,
           achievementPct: null,
+          remainingToTarget: computeRemainingToTarget(r.sales, 0, thresholdPct),
         };
       }
 
@@ -165,9 +234,10 @@ export const RepsView: React.FC<RepsViewProps> = ({
         manualTarget: persistedManual,
         target: cleanTarget,
         achievementPct: computeRepAchievement(r.sales, cleanTarget, r.tax),
+        remainingToTarget: computeRemainingToTarget(r.sales, cleanTarget, thresholdPct),
       };
     });
-  }, [reps, targetMode, drafts, canEditRepRow, getPersistedManualValue]);
+  }, [reps, targetMode, drafts, canEditRepRow, getPersistedManualValue, thresholdPct]);
 
   const dirtyEntries = useMemo(() => {
     if (!canEditTargets) return [];
@@ -349,6 +419,8 @@ export const RepsView: React.FC<RepsViewProps> = ({
     let recordCount = 0;
     let returnCount = 0;
     let branchCount = 0;
+    let externalRepsCount = 0;
+    let targetedRepsCount = 0;
     for (const r of filtered) {
       sales += r.sales;
       tax += r.tax;
@@ -356,9 +428,15 @@ export const RepsView: React.FC<RepsViewProps> = ({
       recordCount += r.recordCount;
       returnCount += r.returnCount;
       branchCount += Math.trunc(r.branchCount || 0);
+      if (r.isExternalSector) {
+        externalRepsCount += 1;
+      } else if (r.target > 0) {
+        targetedRepsCount += 1;
+      }
     }
     const denom = target - tax;
     const achievementPct = denom > 0 ? (sales / denom) * 100 : null;
+    const remainingToTarget = computeRemainingToTarget(sales, target, thresholdPct);
     return {
       sales,
       tax,
@@ -367,11 +445,14 @@ export const RepsView: React.FC<RepsViewProps> = ({
         achievementPct !== null && Number.isFinite(achievementPct)
           ? Number(achievementPct.toFixed(2))
           : null,
+      remainingToTarget,
       recordCount,
       returnCount,
       branchCount,
+      externalRepsCount,
+      targetedRepsCount,
     };
-  }, [filtered]);
+  }, [filtered, thresholdPct]);
 
   const toggleSort = (k: SortKey) => {
     if (sortKey === k) setSortAsc(!sortAsc);
@@ -390,6 +471,7 @@ export const RepsView: React.FC<RepsViewProps> = ({
     endDate,
     extra: [
       { label: 'نظام الهدف', value: modeLabel },
+      { label: 'نسبة المتبقى على تحقيق', value: `${thresholdPct}%` },
       ...(search.trim() ? [{ label: 'بحث', value: search.trim(), fileTag: 'مفلتر' }] : []),
     ],
   });
@@ -413,8 +495,7 @@ export const RepsView: React.FC<RepsViewProps> = ({
             { header: 'الهدف', key: 'target', type: 'currency', minWidth: 16 },
             { header: 'نسبة التحقيق', key: 'achievementPct', type: 'percent', minWidth: 14 },
             { header: 'الفروع', key: 'branchCount', type: 'integer', minWidth: 10 },
-            { header: 'عدد السجلات', key: 'recordCount', type: 'integer', minWidth: 12 },
-            { header: 'عدد المرتجعات', key: 'returnCount', type: 'integer', minWidth: 12 },
+            { header: `المتبقى على تحقيق (${thresholdPct}%)`, key: 'remainingToTarget', type: 'currency', minWidth: 22 },
           ],
           rows: filtered.map((r) => ({
             repCode: r.repCode,
@@ -426,8 +507,7 @@ export const RepsView: React.FC<RepsViewProps> = ({
             target: r.target,
             achievementPct: r.achievementPct,
             branchCount: Math.trunc(r.branchCount || 0),
-            recordCount: r.recordCount,
-            returnCount: r.returnCount,
+            remainingToTarget: r.remainingToTarget,
           })),
           totalRow:
             filtered.length > 0
@@ -441,8 +521,7 @@ export const RepsView: React.FC<RepsViewProps> = ({
                   target: totals.target,
                   achievementPct: totals.achievementPct,
                   branchCount: Math.trunc(totals.branchCount),
-                  recordCount: totals.recordCount,
-                  returnCount: totals.returnCount,
+                  remainingToTarget: totals.remainingToTarget,
                 }
               : null,
         },
@@ -460,7 +539,7 @@ export const RepsView: React.FC<RepsViewProps> = ({
       tables: [
         {
           title: 'جدول أداء مندوبي المبيعات',
-          subtitle: `إجمالي المناديب الظاهرين: ${formatNum(filtered.length)} · ${modeLabel}`,
+          subtitle: `إجمالي المناديب الظاهرين: ${formatNum(filtered.length)} · ${modeLabel} · المتبقى على تحقيق (${thresholdPct}%)`,
           columns: [
             { header: 'الكود', key: 'repCode', type: 'string', align: 'center' },
             { header: 'اسم المندوب', key: 'repName', type: 'string', align: 'right' },
@@ -471,7 +550,7 @@ export const RepsView: React.FC<RepsViewProps> = ({
             { header: 'الهدف', key: 'target', type: 'currency' },
             { header: 'نسبة التحقيق', key: 'achievementPct', type: 'percent' },
             { header: 'الفروع', key: 'branchCount', type: 'integer' },
-            { header: 'السجلات / المرتجعات', key: 'recordsSummary', type: 'string', align: 'center' },
+            { header: `المتبقى على تحقيق (${thresholdPct}%)`, key: 'remainingToTarget', type: 'currency' },
           ],
           rows: filtered.map((r) => ({
             repCode: r.repCode,
@@ -483,7 +562,7 @@ export const RepsView: React.FC<RepsViewProps> = ({
             target: r.target,
             achievementPct: r.achievementPct,
             branchCount: Math.trunc(r.branchCount || 0),
-            recordsSummary: `${formatNum(r.recordCount)} · ${formatNum(r.returnCount)} مرتجع`,
+            remainingToTarget: r.remainingToTarget,
           })),
           totalRow:
             filtered.length > 0
@@ -497,7 +576,7 @@ export const RepsView: React.FC<RepsViewProps> = ({
                   target: totals.target,
                   achievementPct: totals.achievementPct,
                   branchCount: Math.trunc(totals.branchCount),
-                  recordsSummary: `${formatNum(totals.recordCount)} · ${formatNum(totals.returnCount)} مرتجع`,
+                  remainingToTarget: totals.remainingToTarget,
                 }
               : null,
         },
@@ -509,8 +588,100 @@ export const RepsView: React.FC<RepsViewProps> = ({
     return <div className="h-64 bg-white border border-slate-200 rounded-xl animate-pulse" />;
   }
 
+  const effectiveSectorLabel =
+    sectorFilter && sectorFilter !== 'ALL' && sectorFilter !== 'UNLINKED'
+      ? sectorFilter
+      : sectorFilter === 'UNLINKED'
+        ? 'غير مرتبط بقطاع'
+        : 'كل القطاعات';
+
   return (
-    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+    <div className="space-y-5">
+      {/* Top KPI Cards — 100% consistent with scoped table totals & cross-sector target exclusion */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between">
+          <div className="text-xs font-semibold text-slate-500 mb-2">
+            {sectorFilter && sectorFilter !== 'ALL' && sectorFilter !== 'UNLINKED'
+              ? `مبيعات جهاز البيع — ${effectiveSectorLabel}`
+              : 'إجمالي مبيعات جهاز البيع'}
+          </div>
+          <div className="text-xl font-bold font-num tabular-nums text-slate-900" dir="ltr">
+            {formatEGP(totals.sales)}
+          </div>
+          <div className="text-xs text-slate-500 mt-2">
+            من <span className="font-num font-semibold text-slate-700">{formatNum(filtered.length)}</span> مندوب
+            {totals.externalRepsCount > 0 && (
+              <span>
+                {' '}
+                (منهم <span className="font-num font-semibold text-amber-700">{formatNum(totals.externalRepsCount)}</span> من قطاع آخر)
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between">
+          <div className="text-xs font-semibold text-slate-500 mb-2">إجمالي الضريبة والمرتجعات</div>
+          <div className="text-xl font-bold font-num tabular-nums text-slate-900" dir="ltr">
+            {formatEGP(totals.tax)}
+          </div>
+          <div className="text-xs text-slate-500 mt-2">
+            <span className="font-num font-semibold text-slate-700">{formatNum(totals.recordCount)}</span> سجل ·{' '}
+            <span className="font-num font-semibold text-slate-700">{formatNum(totals.returnCount)}</span> مرتجع
+          </div>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between">
+          <div className="text-xs font-semibold text-slate-500 mb-2">
+            إجمالي أهداف جهاز البيع ({targetMode === 'manual' ? 'يدوي' : 'أوتوماتيك'})
+          </div>
+          <div className="text-xl font-bold font-num tabular-nums text-teal-800" dir="ltr">
+            {formatEGP(totals.target)}
+          </div>
+          <div className="text-xs text-slate-500 mt-2">
+            {totals.externalRepsCount > 0 ? (
+              <span>
+                أهداف مناديب القطاع فقط (تم استبعاد أهداف{' '}
+                <span className="font-num font-semibold text-amber-700">{formatNum(totals.externalRepsCount)}</span> مندوب من قطاعات أخرى)
+              </span>
+            ) : (
+              <span>
+                <span className="font-num font-semibold text-slate-700">{formatNum(totals.targetedRepsCount)}</span> مندوب بهدف ·{' '}
+                <span className="font-num font-semibold text-slate-700">{formatNum(Math.trunc(totals.branchCount))}</span> فرع
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between">
+          <div className="text-xs font-semibold text-slate-500 mb-2">نسبة التحقيق الإجمالية</div>
+          <div
+            className={`text-xl font-bold font-num tabular-nums ${
+              totals.achievementPct === null
+                ? 'text-slate-400'
+                : totals.achievementPct >= 100
+                  ? 'text-emerald-700'
+                  : 'text-teal-700'
+            }`}
+            dir="ltr"
+          >
+            {formatRepAchievement(totals.achievementPct)}
+          </div>
+          <div className="text-xs text-slate-500 mt-2">
+            {totals.target - totals.tax > 0 ? (
+              <>
+                صافي الهدف بعد الضريبة:{' '}
+                <span className="font-num font-semibold text-slate-700" dir="ltr">
+                  {formatEGP(totals.target - totals.tax)}
+                </span>
+              </>
+            ) : (
+              <span>لا يوجد هدف صافي موجب ضمن النطاق الحالي</span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
       <div className="p-5 border-b border-slate-200 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
@@ -699,14 +870,40 @@ export const RepsView: React.FC<RepsViewProps> = ({
                   <ArrowUpDown className="w-3.5 h-3.5" />
                 </button>
               </th>
-              <th className="py-3 px-4 whitespace-nowrap">
-                <button
-                  onClick={() => toggleSort('recordCount')}
-                  className="inline-flex items-center gap-1 cursor-pointer hover:text-slate-900"
-                >
-                  <span>السجلات / المرتجعات</span>
-                  <ArrowUpDown className="w-3.5 h-3.5" />
-                </button>
+              <th className="py-2.5 px-4 whitespace-nowrap">
+                <div className="inline-flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => toggleSort('remainingToTarget')}
+                    className="inline-flex items-center gap-1 cursor-pointer hover:text-slate-900"
+                  >
+                    <span>المتبقى على تحقيق</span>
+                    <ArrowUpDown className="w-3.5 h-3.5" />
+                  </button>
+                  <div
+                    className="inline-flex items-center gap-0.5 bg-white border border-slate-300 rounded px-1.5 py-0.5 focus-within:ring-2 focus-within:ring-teal-600 focus-within:border-teal-600"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      dir="ltr"
+                      aria-label="نسبة المتبقى على تحقيق"
+                      value={thresholdPctInput}
+                      onChange={(e) => setThresholdPctInput(e.target.value)}
+                      onBlur={() => {
+                        const trimmed = thresholdPctInput.trim();
+                        const parsed = Number(trimmed);
+                        if (trimmed === '' || !Number.isFinite(parsed) || parsed < 0) {
+                          setThresholdPctInput('100');
+                        }
+                      }}
+                      className="w-12 text-xs font-num tabular-nums text-center text-slate-900 bg-transparent focus:outline-none"
+                    />
+                    <span className="text-[11px] font-num font-bold text-slate-500">%</span>
+                  </div>
+                </div>
               </th>
             </tr>
           </thead>
@@ -735,7 +932,12 @@ export const RepsView: React.FC<RepsViewProps> = ({
                       {r.repCode}
                     </td>
                     <td className="py-2.5 px-4 font-medium text-slate-900 whitespace-nowrap">{r.repName}</td>
-                    <td className="py-2.5 px-4 text-xs text-slate-600 whitespace-nowrap">{r.sectorName}</td>
+                    <td className="py-2.5 px-4 text-xs text-slate-600 whitespace-nowrap">
+                      <div>{r.sectorName}</div>
+                      {r.isExternalSector && (
+                        <div className="text-[10px] text-amber-700">يتبع قطاعاً آخر</div>
+                      )}
+                    </td>
                     <td className="py-2.5 px-4 text-xs text-slate-600 whitespace-nowrap">{r.supervisorName}</td>
                     <td
                       className="py-2.5 px-4 font-num tabular-nums font-semibold text-slate-900 whitespace-nowrap"
@@ -747,7 +949,16 @@ export const RepsView: React.FC<RepsViewProps> = ({
                       {formatEGP(r.tax)}
                     </td>
                     <td className="py-2 px-4 font-num tabular-nums text-slate-700 whitespace-nowrap">
-                      {editable ? (
+                      {r.isExternalSector ? (
+                        <div>
+                          <div dir="ltr" className="text-slate-500">
+                            {formatEGP(0)}
+                          </div>
+                          <div className="text-[10px] text-amber-700">
+                            هدف 0 (تابع لقطاع {r.sectorName})
+                          </div>
+                        </div>
+                      ) : editable ? (
                         <div className="space-y-0.5 min-w-[140px]">
                           <input
                             type="number"
@@ -804,8 +1015,8 @@ export const RepsView: React.FC<RepsViewProps> = ({
                     <td className="py-2.5 px-4 font-num tabular-nums text-slate-700 whitespace-nowrap">
                       {formatNum(Math.trunc(r.branchCount || 0))}
                     </td>
-                    <td className="py-2.5 px-4 font-num tabular-nums text-xs text-slate-600 whitespace-nowrap">
-                      {formatNum(r.recordCount)} · {formatNum(r.returnCount)} مرتجع
+                    <td className="py-2.5 px-4 whitespace-nowrap" dir="ltr">
+                      {renderRemainingValue(r.remainingToTarget)}
                     </td>
                   </tr>
                 );
@@ -833,14 +1044,15 @@ export const RepsView: React.FC<RepsViewProps> = ({
                 <td className="py-2.5 px-4 font-num tabular-nums whitespace-nowrap">
                   {formatNum(Math.trunc(totals.branchCount))}
                 </td>
-                <td className="py-2.5 px-4 font-num tabular-nums text-xs whitespace-nowrap">
-                  {formatNum(totals.recordCount)} · {formatNum(totals.returnCount)} مرتجع
+                <td className="py-2.5 px-4 whitespace-nowrap" dir="ltr">
+                  {renderRemainingValue(totals.remainingToTarget, true)}
                 </td>
               </tr>
             </tfoot>
           )}
         </table>
       </div>
+    </div>
     </div>
   );
 };

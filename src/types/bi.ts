@@ -219,6 +219,7 @@ export interface RepMetricRow {
   target: number;
   autoTarget: number;
   manualTarget: number | null;
+  isExternalSector?: boolean;
   achievementPct: number | null;
   recordCount: number;
   returnCount: number;

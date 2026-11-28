@@ -1592,8 +1592,8 @@ export function saveRepManualTargets(
       const repCode = normalizeCode(rawCode) || rawCode;
 
       const resolvedSector =
-        canonicalizeSectorName(String(item.sectorName || '').trim()) ||
         repSectorMap.get(repCode) ||
+        canonicalizeSectorName(String(item.sectorName || '').trim()) ||
         '';
 
       if (authSet && (!resolvedSector || !authSet.has(resolvedSector))) {
@@ -1636,18 +1636,31 @@ export function getRepsAnalytics(
 
   const manualExactMap = new Map<string, number>();
   const manualTrimmedMap = new Map<string, number>();
+  const manualSectorExactMap = new Map<string, string>();
+  const manualSectorTrimmedMap = new Map<string, string>();
   try {
     const manualRows = db
-      .prepare(`SELECT rep_code, target_value FROM rep_manual_targets`)
-      .all() as Array<{ rep_code: string; target_value: number }>;
+      .prepare(`SELECT rep_code, COALESCE(sector_name, '') AS sector_name, target_value FROM rep_manual_targets`)
+      .all() as Array<{ rep_code: string; sector_name: string; target_value: number }>;
     for (const mr of manualRows) {
+      const exact = normalizeCode(mr.rep_code) || String(mr.rep_code || '').trim();
+      if (!exact) continue;
+      const trimmed = stripLeadingZeros(exact);
+
+      const cleanSec = mr.sector_name && mr.sector_name.trim() && mr.sector_name.trim() !== 'غير محدد'
+        ? canonicalizeSectorName(mr.sector_name.trim())
+        : '';
+      if (cleanSec) {
+        manualSectorExactMap.set(exact, cleanSec);
+        if (trimmed && !manualSectorTrimmedMap.has(trimmed)) {
+          manualSectorTrimmedMap.set(trimmed, cleanSec);
+        }
+      }
+
       const val = Number(mr.target_value);
       if (!Number.isFinite(val) || val < 0) continue;
       const cleanVal = Number(val.toFixed(2));
-      const exact = normalizeCode(mr.rep_code) || String(mr.rep_code || '').trim();
-      if (!exact) continue;
       manualExactMap.set(exact, cleanVal);
-      const trimmed = stripLeadingZeros(exact);
       if (trimmed && !manualTrimmedMap.has(trimmed)) {
         manualTrimmedMap.set(trimmed, cleanVal);
       }
@@ -1662,6 +1675,14 @@ export function getRepsAnalytics(
     const trimmed = stripLeadingZeros(exact);
     if (trimmed && manualTrimmedMap.has(trimmed)) return manualTrimmedMap.get(trimmed)!;
     return null;
+  };
+  const resolveManualSector = (repCode: string): string => {
+    const exact = normalizeCode(repCode) || String(repCode || '').trim();
+    if (!exact) return '';
+    if (manualSectorExactMap.has(exact)) return manualSectorExactMap.get(exact)!;
+    const trimmed = stripLeadingZeros(exact);
+    if (trimmed && manualSectorTrimmedMap.has(trimmed)) return manualSectorTrimmedMap.get(trimmed)!;
+    return '';
   };
 
   const repDefs = db
@@ -1683,9 +1704,17 @@ export function getRepsAnalytics(
   for (const d of repDefs) {
     const exact = normalizeCode(d.rep_code);
     if (exact) {
-      if (!repDefByExact.has(exact)) repDefByExact.set(exact, d);
+      const prevExact = repDefByExact.get(exact);
+      if (!prevExact || (!prevExact.sector_name?.trim() && d.sector_name?.trim())) {
+        repDefByExact.set(exact, d);
+      }
       const trimmed = stripLeadingZeros(exact);
-      if (trimmed && !repDefByTrimmed.has(trimmed)) repDefByTrimmed.set(trimmed, d);
+      if (trimmed) {
+        const prevTrim = repDefByTrimmed.get(trimmed);
+        if (!prevTrim || (!prevTrim.sector_name?.trim() && d.sector_name?.trim())) {
+          repDefByTrimmed.set(trimmed, d);
+        }
+      }
     }
   }
   const resolveRepDef = (code: string) => {
@@ -1695,7 +1724,8 @@ export function getRepsAnalytics(
   };
 
   // Aggregate branch targets & unique targeted branches (branch_target > 0) per rep within authorized/selected sectors
-  // Deduplicates by BOTH branch_code (preserving leading zeros) AND normalized branch_name per rep/supervisor/sector
+  // Deduplicates by BOTH branch_code (preserving leading zeros) AND normalized branch_name per rep/supervisor/sector.
+  // Also tracks ALL branch sectors globally per rep so we always know which sector a rep actually belongs to.
   const branchRows = db
     .prepare(
       `SELECT
@@ -1729,73 +1759,155 @@ export function getRepsAnalytics(
   }
   const repBranchMetaMap = new Map<string, RepBranchMeta>();
   const repBranchMetaTrimmedMap = new Map<string, RepBranchMeta>();
+  const allBranchSectorStatsExact = new Map<string, Map<string, { targetSum: number; count: number }>>();
+  const allBranchSectorStatsTrimmed = new Map<string, Map<string, { targetSum: number; count: number }>>();
   const seenExactBranchCodes = new Set<string>();
 
-  if (selectedSector !== 'UNLINKED') {
-    for (const b of branchRows) {
-      const sec = canonicalizeSectorName(b.sector_name || 'التوريد المباشر');
-      if (user.role !== 'admin' && !scope.authorizedSectors.includes(sec)) continue;
-      if (selectedSector !== 'ALL' && sec !== selectedSector) continue;
+  for (const b of branchRows) {
+    // Preserve leading zeros in branch_code and deduplicate exact branch code rows globally (matching getBranchesAnalytics)
+    const normBranchCode = normalizeCode(b.branch_code) || String(b.branch_code ?? '').trim();
+    if (!normBranchCode || seenExactBranchCodes.has(normBranchCode)) continue;
+    seenExactBranchCodes.add(normBranchCode);
 
-      // Preserve leading zeros in branch_code and deduplicate exact branch code rows globally (matching getBranchesAnalytics)
-      const normBranchCode = normalizeCode(b.branch_code) || String(b.branch_code ?? '').trim();
-      if (!normBranchCode || seenExactBranchCodes.has(normBranchCode)) continue;
-      seenExactBranchCodes.add(normBranchCode);
+    const normRep = normalizeCode(b.rep_code);
+    if (!normRep) continue;
+    const defMatch = resolveRepDef(normRep);
+    const canonicalRepKey = defMatch ? normalizeCode(defMatch.rep_code) : normRep;
+    const trimmedKey = stripLeadingZeros(canonicalRepKey);
 
-      const normRep = normalizeCode(b.rep_code);
-      if (!normRep) continue;
-      const defMatch = resolveRepDef(normRep);
-      const canonicalRepKey = defMatch ? normalizeCode(defMatch.rep_code) : normRep;
-      const trimmedKey = stripLeadingZeros(canonicalRepKey);
+    const sec = canonicalizeSectorName(b.sector_name || 'التوريد المباشر');
+    const targetVal = Number(b.branch_target);
+    const safeTarget = Number.isFinite(targetVal) && targetVal > 0 ? targetVal : 0;
 
-      let meta = repBranchMetaMap.get(canonicalRepKey);
-      if (!meta) {
-        meta = {
-          repName: (defMatch?.rep_name || b.rep_name || canonicalRepKey).trim(),
-          target: 0,
-          branchGroups: new Map(),
-          targetBranchKeys: new Set(),
-          supervisors: new Set(),
-          sectors: new Set(),
-        };
-        repBranchMetaMap.set(canonicalRepKey, meta);
-        if (trimmedKey && !repBranchMetaTrimmedMap.has(trimmedKey)) {
-          repBranchMetaTrimmedMap.set(trimmedKey, meta);
-        }
+    // Track global branch sector membership (across all sectors, regardless of selectedSector)
+    if (sec) {
+      let statsMap = allBranchSectorStatsExact.get(canonicalRepKey);
+      if (!statsMap) {
+        statsMap = new Map();
+        allBranchSectorStatsExact.set(canonicalRepKey, statsMap);
       }
+      const prevStat = statsMap.get(sec) ?? { targetSum: 0, count: 0 };
+      prevStat.targetSum += safeTarget;
+      prevStat.count += 1;
+      statsMap.set(sec, prevStat);
 
-      const cleanBranchName = (b.branch_name || '').trim() || normBranchCode;
-      const normBranchName = normalizeArabic(cleanBranchName);
-      const supervisorLabel = b.supervisor_name.trim() || 'غير محدد';
-      const normSup = normalizeArabic(supervisorLabel);
-      const groupKey = normBranchName
-        ? `${sec}::${normSup}::${normBranchName}`
-        : `code::${normBranchCode}`;
-
-      const targetVal = Number(b.branch_target);
-      const safeTarget = Number.isFinite(targetVal) && targetVal > 0 ? targetVal : 0;
-
-      const existingGroup = meta.branchGroups.get(groupKey) ?? { target: 0 };
-      existingGroup.target += safeTarget;
-      meta.branchGroups.set(groupKey, existingGroup);
-
-      if (sec) meta.sectors.add(sec);
-      if (b.supervisor_name && b.supervisor_name.trim()) {
-        meta.supervisors.add(b.supervisor_name.trim());
+      if (trimmedKey) {
+        let trimStats = allBranchSectorStatsTrimmed.get(trimmedKey);
+        if (!trimStats) {
+          trimStats = statsMap;
+          allBranchSectorStatsTrimmed.set(trimmedKey, trimStats);
+        }
       }
     }
 
-    for (const meta of repBranchMetaMap.values()) {
-      let sumTarget = 0;
-      for (const [groupKey, group] of meta.branchGroups.entries()) {
-        if (group.target > 0) {
-          sumTarget += group.target;
-          meta.targetBranchKeys.add(groupKey);
-        }
+    if (selectedSector === 'UNLINKED') continue;
+    if (user.role !== 'admin' && !scope.authorizedSectors.includes(sec)) continue;
+    if (selectedSector !== 'ALL' && sec !== selectedSector) continue;
+
+    let meta = repBranchMetaMap.get(canonicalRepKey);
+    if (!meta) {
+      meta = {
+        repName: (defMatch?.rep_name || b.rep_name || canonicalRepKey).trim(),
+        target: 0,
+        branchGroups: new Map(),
+        targetBranchKeys: new Set(),
+        supervisors: new Set(),
+        sectors: new Set(),
+      };
+      repBranchMetaMap.set(canonicalRepKey, meta);
+      if (trimmedKey && !repBranchMetaTrimmedMap.has(trimmedKey)) {
+        repBranchMetaTrimmedMap.set(trimmedKey, meta);
       }
-      meta.target = sumTarget;
+    }
+
+    const cleanBranchName = (b.branch_name || '').trim() || normBranchCode;
+    const normBranchName = normalizeArabic(cleanBranchName);
+    const supervisorLabel = b.supervisor_name.trim() || 'غير محدد';
+    const normSup = normalizeArabic(supervisorLabel);
+    const groupKey = normBranchName
+      ? `${sec}::${normSup}::${normBranchName}`
+      : `code::${normBranchCode}`;
+
+    const existingGroup = meta.branchGroups.get(groupKey) ?? { target: 0 };
+    existingGroup.target += safeTarget;
+    meta.branchGroups.set(groupKey, existingGroup);
+
+    if (sec) meta.sectors.add(sec);
+    if (b.supervisor_name && b.supervisor_name.trim()) {
+      meta.supervisors.add(b.supervisor_name.trim());
     }
   }
+
+  for (const meta of repBranchMetaMap.values()) {
+    let sumTarget = 0;
+    for (const [groupKey, group] of meta.branchGroups.entries()) {
+      if (group.target > 0) {
+        sumTarget += group.target;
+        meta.targetBranchKeys.add(groupKey);
+      }
+    }
+    meta.target = sumTarget;
+  }
+
+  const resolveBranchHomeSector = (repKey: string): string => {
+    const stats =
+      allBranchSectorStatsExact.get(repKey) ??
+      allBranchSectorStatsTrimmed.get(stripLeadingZeros(repKey));
+    if (!stats || stats.size === 0) return '';
+    let bestSector = '';
+    let bestTarget = -1;
+    let bestCount = -1;
+    for (const [sec, st] of stats.entries()) {
+      if (
+        st.targetSum > bestTarget ||
+        (st.targetSum === bestTarget && st.count > bestCount)
+      ) {
+        bestSector = sec;
+        bestTarget = st.targetSum;
+        bestCount = st.count;
+      }
+    }
+    return bestSector;
+  };
+
+  const resolveRepHomeSector = (
+    repKey: string,
+    def?: (typeof repDefs)[number]
+  ): string => {
+    const rawDefSec = def?.sector_name?.trim() || '';
+    if (rawDefSec && rawDefSec !== 'غير محدد') {
+      return canonicalizeSectorName(rawDefSec);
+    }
+    const branchHome = resolveBranchHomeSector(repKey);
+    if (branchHome) return branchHome;
+    const manualSec = resolveManualSector(repKey);
+    if (manualSec) return manualSec;
+    return '';
+  };
+
+  const isTargetEligibleForScope = (
+    isUnlinked: boolean,
+    homeSector: string,
+    fallbackSalesSector: string
+  ): boolean => {
+    if (isUnlinked || selectedSector === 'UNLINKED') return false;
+    if (selectedSector !== 'ALL') {
+      if (homeSector) {
+        if (homeSector !== selectedSector) return false;
+        return user.role === 'admin' || scope.authorizedSectors.includes(homeSector);
+      }
+      // Unmastered rep with no sector in sales_reps/branches/manual_targets
+      const cleanSalesSec =
+        fallbackSalesSector && fallbackSalesSector !== 'غير محدد'
+          ? canonicalizeSectorName(fallbackSalesSector)
+          : '';
+      return user.role === 'admin' || !cleanSalesSec || scope.authorizedSectors.includes(cleanSalesSec);
+    }
+    // selectedSector === 'ALL'
+    if (user.role === 'admin') return true;
+    if (homeSector) return scope.authorizedSectors.includes(homeSector);
+    return true;
+  };
 
   const rows = db
     .prepare(
@@ -1831,6 +1943,7 @@ export function getRepsAnalytics(
     tax: number;
     autoTarget: number;
     manualTarget: number | null;
+    isExternalSector: boolean;
     recordCount: number;
     returnCount: number;
     branchCount: number;
@@ -1853,32 +1966,40 @@ export function getRepsAnalytics(
         branchMeta && branchMeta.supervisors.size > 0
           ? Array.from(branchMeta.supervisors).join('، ')
           : '';
-      const defSector = def?.sector_name ? canonicalizeSectorName(def.sector_name) : '';
+      const homeSector = isUnlinked ? '' : resolveRepHomeSector(key, def);
+      const targetEligible = isTargetEligibleForScope(isUnlinked, homeSector, r.sector_name || '');
+      const isExternalSector = !isUnlinked && selectedSector !== 'UNLINKED' && !targetEligible;
+
       const defTargetMatchesScope =
+        targetEligible &&
         def &&
         def.monthly_target > 0 &&
-        selectedSector !== 'UNLINKED' &&
-        (user.role === 'admin' || !defSector || scope.authorizedSectors.includes(defSector)) &&
-        (selectedSector === 'ALL' || !defSector || defSector === selectedSector);
-      const autoTargetVal =
-        branchMeta && branchMeta.target > 0
+        (user.role === 'admin' || !homeSector || scope.authorizedSectors.includes(homeSector)) &&
+        (selectedSector === 'ALL' || !homeSector || homeSector === selectedSector);
+
+      const autoTargetVal = !targetEligible
+        ? 0
+        : branchMeta && branchMeta.target > 0
           ? branchMeta.target
           : defTargetMatchesScope
             ? def!.monthly_target
             : 0;
-      const manualVal = isUnlinked ? null : resolveManualTarget(key);
+      const manualVal = targetEligible ? resolveManualTarget(key) : null;
 
       repBuckets.set(key, {
         repCode: isUnlinked ? 'غير محدد' : key,
         repName: isUnlinked
           ? 'سجلات بدون كود مندوب'
           : def?.rep_name || r.resolved_rep_name || r.rep_code,
-        sectorName: defSector || r.sector_name || 'غير محدد',
+        sectorName: isUnlinked
+          ? r.sector_name || 'غير محدد'
+          : homeSector || r.sector_name || 'غير محدد',
         supervisorName: def?.supervisor_name?.trim() || branchSup || '-',
         sales: r.sales,
         tax: r.tax,
         autoTarget: autoTargetVal,
         manualTarget: manualVal,
+        isExternalSector,
         recordCount: r.record_count,
         returnCount: r.return_count,
         branchCount: branchMeta ? branchMeta.targetBranchKeys.size : 0,
@@ -1891,19 +2012,21 @@ export function getRepsAnalytics(
     }
   }
 
-  // Ensure defined reps with targets (branch/def auto target OR saved manual target in manual mode) stay visible even if 0 sales in a narrowed date range
+  // Ensure defined reps belonging to the selected/authorized sector stay visible even if 0 sales in a narrowed date range
   if (selectedSector !== 'UNLINKED') {
     for (const d of repDefs) {
       const key = normalizeCode(d.rep_code);
       if (!key || repBuckets.has(key)) continue;
       const branchMeta = repBranchMetaMap.get(key) ?? repBranchMetaTrimmedMap.get(stripLeadingZeros(key));
-      const defSector = d.sector_name ? canonicalizeSectorName(d.sector_name) : '';
-      const inAuth = user.role === 'admin' || !defSector || scope.authorizedSectors.includes(defSector);
-      const inSelected = selectedSector === 'ALL' || (defSector && defSector === selectedSector);
+      const homeSector = resolveRepHomeSector(key, d);
+      const inAuth = user.role === 'admin' || !homeSector || scope.authorizedSectors.includes(homeSector);
+      const inSelected = selectedSector === 'ALL' || (homeSector !== '' && homeSector === selectedSector);
+      if (!inAuth || !inSelected) continue;
+
       const hasBranchTarget = (branchMeta?.target ?? 0) > 0;
-      const hasDefTarget = d.monthly_target > 0 && inAuth && inSelected;
+      const hasDefTarget = d.monthly_target > 0;
       const manualVal = resolveManualTarget(key);
-      const hasManualTargetInScope = effectiveMode === 'manual' && manualVal !== null && manualVal > 0 && inAuth && inSelected;
+      const hasManualTargetInScope = effectiveMode === 'manual' && manualVal !== null && manualVal > 0;
       if (!hasBranchTarget && !hasDefTarget && !hasManualTargetInScope) continue;
 
       const branchSup =
@@ -1914,12 +2037,13 @@ export function getRepsAnalytics(
       repBuckets.set(key, {
         repCode: key,
         repName: d.rep_name || key,
-        sectorName: defSector || (branchMeta ? Array.from(branchMeta.sectors)[0] : '') || 'غير محدد',
+        sectorName: homeSector || (branchMeta ? Array.from(branchMeta.sectors)[0] : '') || 'غير محدد',
         supervisorName: d.supervisor_name?.trim() || branchSup || '-',
         sales: 0,
         tax: 0,
         autoTarget: autoTargetVal,
         manualTarget: manualVal,
+        isExternalSector: false,
         recordCount: 0,
         returnCount: 0,
         branchCount: branchMeta ? branchMeta.targetBranchKeys.size : 0,
@@ -1928,17 +2052,23 @@ export function getRepsAnalytics(
 
     for (const [key, branchMeta] of repBranchMetaMap.entries()) {
       if (repBuckets.has(key) || branchMeta.target <= 0) continue;
+      const def = resolveRepDef(key);
+      const homeSector = resolveRepHomeSector(key, def);
+      if (selectedSector !== 'ALL' && homeSector && homeSector !== selectedSector) continue;
+      if (user.role !== 'admin' && homeSector && !scope.authorizedSectors.includes(homeSector)) continue;
+
       const branchSup = branchMeta.supervisors.size > 0 ? Array.from(branchMeta.supervisors).join('، ') : '-';
       const manualVal = resolveManualTarget(key);
       repBuckets.set(key, {
         repCode: key,
         repName: branchMeta.repName || key,
-        sectorName: Array.from(branchMeta.sectors)[0] || 'غير محدد',
+        sectorName: homeSector || Array.from(branchMeta.sectors)[0] || 'غير محدد',
         supervisorName: branchSup,
         sales: 0,
         tax: 0,
         autoTarget: branchMeta.target,
         manualTarget: manualVal,
+        isExternalSector: false,
         recordCount: 0,
         returnCount: 0,
         branchCount: branchMeta.targetBranchKeys.size,
@@ -1949,10 +2079,15 @@ export function getRepsAnalytics(
   const result: RepMetricRow[] = Array.from(repBuckets.values()).map((b) => {
     const sales = Number(b.sales.toFixed(2));
     const tax = Number(b.tax.toFixed(2));
-    const autoTarget = Number(b.autoTarget.toFixed(2));
-    const manualTarget = b.manualTarget !== null ? Number(b.manualTarget.toFixed(2)) : null;
     const isUnlinkedRow = b.repCode === 'غير محدد';
-    const target = isUnlinkedRow
+    const zeroedTarget = isUnlinkedRow || b.isExternalSector;
+    const autoTarget = zeroedTarget ? 0 : Number(b.autoTarget.toFixed(2));
+    const manualTarget = zeroedTarget
+      ? null
+      : b.manualTarget !== null
+        ? Number(b.manualTarget.toFixed(2))
+        : null;
+    const target = zeroedTarget
       ? 0
       : effectiveMode === 'manual'
         ? manualTarget ?? 0
@@ -1967,6 +2102,7 @@ export function getRepsAnalytics(
       target,
       autoTarget,
       manualTarget,
+      isExternalSector: b.isExternalSector,
       achievementPct: calculateAchievementPct(sales, target, tax),
       recordCount: b.recordCount,
       returnCount: b.returnCount,
