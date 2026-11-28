@@ -117,6 +117,7 @@ interface TableDisplayRow {
   key: string;
   label: string;
   sales: number;
+  netSales: number;
   tax: number;
   target: number;
   variance: number;
@@ -176,6 +177,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
         key: 'agg-private',
         label: 'إجمالي مبيعات الأسواق الخاصة',
         sales: aggPrivate.sales,
+        netSales: aggPrivate.netSales ?? 0,
         tax: aggPrivate.tax,
         target: aggPrivate.target,
         variance: aggPrivate.variance,
@@ -193,6 +195,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
         key: 'agg-direct-army',
         label: 'إجمالي مبيعات المباشر والجيش',
         sales: aggDirectArmy.sales,
+        netSales: aggDirectArmy.netSales ?? 0,
         tax: aggDirectArmy.tax,
         target: aggDirectArmy.target,
         variance: aggDirectArmy.variance,
@@ -210,6 +213,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
         key: 'agg-chains',
         label: 'إجمالي مبيعات قطاع السلاسل',
         sales: aggChains.sales,
+        netSales: aggChains.netSales ?? 0,
         tax: aggChains.tax,
         target: aggChains.target,
         variance: aggChains.variance,
@@ -223,6 +227,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
         key: `sector-${s.sectorName}`,
         label: getTableSectorLabel(s.sectorName),
         sales: s.sales,
+        netSales: s.netSales ?? 0,
         tax: s.tax,
         target: s.target,
         variance: s.variance,
@@ -276,10 +281,26 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
   }
 
   const { kpis, sourceComparison } = data;
-  const salesCard = formatMillionOrFull(kpis.privateMarketsSales);
+  const isUnlinkedSectorFilter = sectorFilter === 'UNLINKED';
+  const isSingleSectorFilter = sectorFilter !== 'ALL' && !isUnlinkedSectorFilter;
+  const primarySalesValue = isUnlinkedSectorFilter ? kpis.totalSourceSales : kpis.privateMarketsSales;
+  const primaryNetSalesValue = isUnlinkedSectorFilter
+    ? (kpis.totalSourceNetSales ?? 0)
+    : (kpis.privateMarketsNetSales ?? 0);
+  const directAndArmyNetSalesValue = kpis.directAndArmyNetSales ?? 0;
+
+  const primarySalesLabel = isUnlinkedSectorFilter
+    ? 'مبيعات السجلات غير المرتبطة بقطاع'
+    : isSingleSectorFilter
+      ? `مبيعات قطاع ${sectorFilter}`
+      : 'مبيعات الأسواق الخاصة';
+
+  const salesCard = formatMillionOrFull(primarySalesValue);
+  const netSalesCard = formatMillionOrFull(primaryNetSalesValue);
   const targetCard = formatMillionOrFull(kpis.privateMarketsTarget);
   const varianceCard = formatMillionOrFull(kpis.privateMarketsVariance);
   const directArmyCard = formatMillionOrFull(kpis.directAndArmySales);
+  const directArmyNetCard = formatMillionOrFull(directAndArmyNetSalesValue);
 
   const mainAch = kpis.privateMarketsAchievementPct;
   const mainAchPositive = mainAch !== null && mainAch >= 100;
@@ -302,12 +323,14 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
             sourceName: 'VF05N (2)',
             count: sourceComparison.vf05n.count,
             salesTotal: sourceComparison.vf05n.salesTotal,
+            netSalesTotal: sourceComparison.vf05n.netSalesTotal ?? 0,
             taxTotal: sourceComparison.vf05n.taxTotal,
           },
           {
             sourceName: 'Zsales_Price (2)',
             count: sourceComparison.zsales.count,
             salesTotal: sourceComparison.zsales.salesTotal,
+            netSalesTotal: sourceComparison.zsales.netSalesTotal ?? 0,
             taxTotal: sourceComparison.zsales.taxTotal,
           },
         ]
@@ -321,11 +344,13 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
           title: 'تحليلات قطاع السلاسل — لوحة المعلومات الرئيسية',
           subtitle: filterMeta.summary.join(' | '),
           summaryPairs: [
-            { label: 'إجمالي مبيعات الأسواق الخاصة', value: kpis.privateMarketsSales, type: 'currency' },
+            { label: `${primarySalesLabel} — إجمالي قيمة المبيعات`, value: primarySalesValue, type: 'currency' },
+            { label: `${primarySalesLabel} — صافي قيمة المبيعات`, value: primaryNetSalesValue, type: 'currency' },
             { label: 'إجمالي الهدف (الأسواق الخاصة)', value: kpis.privateMarketsTarget, type: 'currency' },
             { label: 'نسبة التحقيق (الأسواق الخاصة)', value: kpis.privateMarketsAchievementPct, type: 'percent' },
             { label: 'الفرق عن الهدف', value: kpis.privateMarketsVariance, type: 'currency' },
-            { label: 'البيع المباشر و الجيش', value: kpis.directAndArmySales, type: 'currency' },
+            { label: 'المباشر والجيش — إجمالي قيمة المبيعات', value: kpis.directAndArmySales, type: 'currency' },
+            { label: 'المباشر والجيش — صافي قيمة المبيعات', value: directAndArmyNetSalesValue, type: 'currency' },
             { label: 'نسبة تحقيق البيع المباشر و الجيش', value: kpis.directAndArmyAchievementPct, type: 'percent' },
             { label: 'ضريبة المصدر النشط', value: kpis.totalSourceTax, type: 'currency' },
             { label: 'سجلات غير مرتبطة بفرع', value: kpis.unlinkedBranchCount, type: 'integer' },
@@ -335,7 +360,8 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
             ? [
                 { header: 'مصدر البيانات', key: 'sourceName', type: 'string', minWidth: 20 },
                 { header: 'عدد السجلات', key: 'count', type: 'integer', minWidth: 14 },
-                { header: 'إجمالي المبيعات', key: 'salesTotal', type: 'currency', minWidth: 18 },
+                { header: 'إجمالي قيمة المبيعات', key: 'salesTotal', type: 'currency', minWidth: 18 },
+                { header: 'صافي قيمة المبيعات', key: 'netSalesTotal', type: 'currency', minWidth: 18 },
                 { header: 'إجمالي الضريبة', key: 'taxTotal', type: 'currency', minWidth: 18 },
               ]
             : [],
@@ -347,7 +373,8 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
           subtitle: filterMeta.summary.join(' | '),
           columns: [
             { header: 'القطاع', key: 'label', type: 'string', minWidth: 28 },
-            { header: 'المبيعات', key: 'sales', type: 'currency', minWidth: 18 },
+            { header: 'إجمالي قيمة المبيعات', key: 'sales', type: 'currency', minWidth: 18 },
+            { header: 'صافي قيمة المبيعات', key: 'netSales', type: 'currency', minWidth: 18 },
             { header: 'الضريبة', key: 'tax', type: 'currency', minWidth: 16 },
             { header: 'الهدف', key: 'target', type: 'currency', minWidth: 18 },
             { header: 'الفرق', key: 'variance', type: 'currency', minWidth: 18 },
@@ -356,6 +383,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
           rows: tableRows.map((r) => ({
             label: r.label,
             sales: r.sales,
+            netSales: r.netSales,
             tax: r.tax,
             target: r.target,
             variance: r.variance,
@@ -388,8 +416,8 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
           {
             title: 'التحقق من تطابق المصادر (دون جمع)',
             items: [
-              `VF05N (2): ${formatEGP(sourceComparison.vf05n.salesTotal)} (ضريبة ${formatEGP(sourceComparison.vf05n.taxTotal)} · ${formatNum(sourceComparison.vf05n.count)} سجل)`,
-              `Zsales_Price (2): ${formatEGP(sourceComparison.zsales.salesTotal)} (ضريبة ${formatEGP(sourceComparison.zsales.taxTotal)} · ${formatNum(sourceComparison.zsales.count)} سجل)`,
+              `VF05N (2): إجمالي ${formatEGP(sourceComparison.vf05n.salesTotal)} · صافي ${formatEGP(sourceComparison.vf05n.netSalesTotal ?? 0)} (ضريبة ${formatEGP(sourceComparison.vf05n.taxTotal)} · ${formatNum(sourceComparison.vf05n.count)} سجل)`,
+              `Zsales_Price (2): إجمالي ${formatEGP(sourceComparison.zsales.salesTotal)} · صافي ${formatEGP(sourceComparison.zsales.netSalesTotal ?? 0)} (ضريبة ${formatEGP(sourceComparison.zsales.taxTotal)} · ${formatNum(sourceComparison.zsales.count)} سجل)`,
               sourceComparison.isMatched
                 ? 'الحالة: المصدران متطابقان بالكامل'
                 : `الحالة: يوجد فرق ${formatEGP(sourceComparison.salesDifference)}`,
@@ -439,9 +467,10 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
       orientation: 'landscape',
       kpis: [
         {
-          label: 'إجمالي مبيعات الأسواق الخاصة',
-          value: formatNum(kpis.privateMarketsSales, 2),
+          label: primarySalesLabel,
+          value: formatNum(primarySalesValue, 2),
           unit: 'EGP',
+          sublabel: `صافي قيمة المبيعات: ${formatEGP(primaryNetSalesValue)}`,
         },
         {
           label: 'إجمالي الهدف',
@@ -460,10 +489,10 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
           tone: variancePositive ? 'positive' : 'negative',
         },
         {
-          label: 'البيع المباشر و الجيش',
+          label: 'مبيعات المباشر والجيش',
           value: formatNum(kpis.directAndArmySales, 2),
           unit: 'EGP',
-          sublabel: `من الهدف ${formatPct(directArmyAch)}`,
+          sublabel: `صافي: ${formatEGP(directAndArmyNetSalesValue)} · من الهدف ${formatPct(directArmyAch)}`,
         },
       ],
       infoBlocks,
@@ -472,7 +501,8 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
           title: 'التفاصيل حسب القطاع',
           columns: [
             { header: 'القطاع', key: 'label', type: 'string', align: 'right' },
-            { header: 'المبيعات', key: 'sales', type: 'currency' },
+            { header: 'إجمالي قيمة المبيعات', key: 'sales', type: 'currency' },
+            { header: 'صافي قيمة المبيعات', key: 'netSales', type: 'currency' },
             { header: 'الضريبة', key: 'tax', type: 'currency' },
             { header: 'الهدف', key: 'target', type: 'currency' },
             { header: 'الفرق', key: 'variance', type: 'currency' },
@@ -481,6 +511,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
           rows: tableRows.map((r) => ({
             label: r.label,
             sales: r.sales,
+            netSales: r.netSales,
             tax: r.tax,
             target: r.target,
             variance: r.variance,
@@ -542,23 +573,34 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
 
       {/* Top Row: 5 Equal-Height KPI Cards (Right to Left in RTL) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5 items-stretch">
-        {/* Card 1: Total Private Markets Sales */}
-        <div
-          className="bg-white border border-slate-200 rounded-lg px-4 py-3.5 flex flex-col justify-between text-center min-h-[108px]"
-          title={formatEGP(kpis.privateMarketsSales)}
-        >
-          <span className="text-xs font-semibold text-slate-500">إجمالي مبيعات الأسواق الخاصة</span>
-          <div className="text-2xl font-bold text-slate-900 flex items-baseline justify-center gap-1.5 my-auto pt-1">
-            <span dir="ltr" className="font-num tabular-nums">
-              {salesCard.numText}
-            </span>
-            <span className="text-base font-bold text-slate-800">{salesCard.unit}</span>
+        {/* Card 1: Total Private Markets / Filtered Sector Sales (Both Gross & Net) */}
+        <div className="bg-white border border-slate-200 rounded-lg px-4 py-3.5 flex flex-col justify-between text-center min-h-[124px]">
+          <span className="text-xs font-semibold text-slate-500">{primarySalesLabel}</span>
+          <div className="my-auto pt-1.5 space-y-1.5">
+            <div title={formatEGP(primarySalesValue)}>
+              <div className="text-[11px] font-medium text-slate-500">إجمالي قيمة المبيعات</div>
+              <div className="text-xl font-bold text-slate-900 flex items-baseline justify-center gap-1">
+                <span dir="ltr" className="font-num tabular-nums">
+                  {salesCard.numText}
+                </span>
+                <span className="text-sm font-bold text-slate-800">{salesCard.unit}</span>
+              </div>
+            </div>
+            <div className="pt-1.5 border-t border-slate-100" title={formatEGP(primaryNetSalesValue)}>
+              <div className="text-[11px] font-medium text-teal-700">صافي قيمة المبيعات</div>
+              <div className="text-base font-bold text-teal-800 flex items-baseline justify-center gap-1">
+                <span dir="ltr" className="font-num tabular-nums">
+                  {netSalesCard.numText}
+                </span>
+                <span className="text-xs font-bold text-teal-700">{netSalesCard.unit}</span>
+              </div>
+            </div>
           </div>
         </div>
 
         {/* Card 2: Total Target */}
         <div
-          className="bg-white border border-slate-200 rounded-lg px-4 py-3.5 flex flex-col justify-between text-center min-h-[108px]"
+          className="bg-white border border-slate-200 rounded-lg px-4 py-3.5 flex flex-col justify-between text-center min-h-[124px]"
           title={formatEGP(kpis.privateMarketsTarget)}
         >
           <span className="text-xs font-semibold text-slate-500">إجمالي الهدف</span>
@@ -571,7 +613,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
         </div>
 
         {/* Card 3: Achievement Percentage */}
-        <div className="bg-white border border-slate-200 rounded-lg px-4 py-3.5 flex flex-col justify-between text-center min-h-[108px]">
+        <div className="bg-white border border-slate-200 rounded-lg px-4 py-3.5 flex flex-col justify-between text-center min-h-[124px]">
           <span className="text-xs font-semibold text-slate-500">نسبة التحقيق</span>
           <div className="flex items-center justify-center gap-2.5 my-auto pt-1">
             <span dir="ltr" className="text-2xl font-bold font-num tabular-nums text-slate-900">
@@ -588,7 +630,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
 
         {/* Card 4: Variance from Target */}
         <div
-          className="bg-white border border-slate-200 rounded-lg px-4 py-3.5 flex flex-col justify-between text-center min-h-[108px]"
+          className="bg-white border border-slate-200 rounded-lg px-4 py-3.5 flex flex-col justify-between text-center min-h-[124px]"
           title={formatEGP(kpis.privateMarketsVariance)}
         >
           <span className="text-xs font-semibold text-slate-500">الفرق عن الهدف</span>
@@ -604,21 +646,30 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
           </div>
         </div>
 
-        {/* Card 5: Direct Sales & Army */}
-        <div
-          className="bg-white border border-slate-200 rounded-lg px-4 py-3.5 flex flex-col justify-between text-center min-h-[108px]"
-          title={formatEGP(kpis.directAndArmySales)}
-        >
-          <span className="text-xs font-semibold text-slate-500">البيع المباشر و الجيش</span>
-          <div className="my-auto pt-1">
-            <div className="text-2xl font-bold text-slate-900 flex items-baseline justify-center gap-1.5">
-              <span dir="ltr" className="font-num tabular-nums">
-                {directArmyCard.numText}
-              </span>
-              <span className="text-base font-bold text-slate-800">{directArmyCard.unit}</span>
+        {/* Card 5: Direct Sales & Army (Both Gross & Net) */}
+        <div className="bg-white border border-slate-200 rounded-lg px-4 py-3.5 flex flex-col justify-between text-center min-h-[124px]">
+          <span className="text-xs font-semibold text-slate-500">مبيعات المباشر والجيش</span>
+          <div className="my-auto pt-1 space-y-1">
+            <div title={formatEGP(kpis.directAndArmySales)}>
+              <div className="text-[11px] font-medium text-slate-500">إجمالي قيمة المبيعات</div>
+              <div className="text-xl font-bold text-slate-900 flex items-baseline justify-center gap-1">
+                <span dir="ltr" className="font-num tabular-nums">
+                  {directArmyCard.numText}
+                </span>
+                <span className="text-sm font-bold text-slate-800">{directArmyCard.unit}</span>
+              </div>
+            </div>
+            <div className="pt-1 border-t border-slate-100" title={formatEGP(directAndArmyNetSalesValue)}>
+              <div className="text-[11px] font-medium text-teal-700">صافي قيمة المبيعات</div>
+              <div className="text-base font-bold text-teal-800 flex items-baseline justify-center gap-1">
+                <span dir="ltr" className="font-num tabular-nums">
+                  {directArmyNetCard.numText}
+                </span>
+                <span className="text-xs font-bold text-teal-700">{directArmyNetCard.unit}</span>
+              </div>
             </div>
             <div
-              className={`mt-1 inline-flex items-center justify-center gap-1 text-xs font-semibold ${
+              className={`pt-0.5 inline-flex items-center justify-center gap-1 text-xs font-semibold ${
                 directArmyAch === null
                   ? 'text-slate-500'
                   : directArmyAchPositive
@@ -665,7 +716,8 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
                 <thead className="bg-slate-100 border-b border-slate-200 text-slate-700 font-bold">
                   <tr>
                     <th className="py-2.5 px-3 whitespace-nowrap">القطاع</th>
-                    <th className="py-2.5 px-2.5 whitespace-nowrap">المبيعات</th>
+                    <th className="py-2.5 px-2.5 whitespace-nowrap">إجمالي قيمة المبيعات</th>
+                    <th className="py-2.5 px-2.5 whitespace-nowrap">صافي قيمة المبيعات</th>
                     <th className="py-2.5 px-2.5 whitespace-nowrap">الضريبة</th>
                     <th className="py-2.5 px-2.5 whitespace-nowrap">الهدف</th>
                     <th className="py-2.5 px-2.5 whitespace-nowrap">الفرق</th>
@@ -691,6 +743,9 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
                         <td className="py-2.5 px-3 whitespace-nowrap">{row.label}</td>
                         <td className="py-2.5 px-2.5 font-num tabular-nums whitespace-nowrap" dir="ltr" title={formatEGP(row.sales)}>
                           {formatNum(row.sales, 0)}
+                        </td>
+                        <td className="py-2.5 px-2.5 font-num tabular-nums whitespace-nowrap text-teal-800" dir="ltr" title={formatEGP(row.netSales)}>
+                          {formatNum(row.netSales, 0)}
                         </td>
                         <td
                           className="py-2.5 px-2.5 font-num tabular-nums whitespace-nowrap text-slate-700"
@@ -840,13 +895,15 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
           <div className="flex flex-wrap items-center gap-4">
             <span className="font-bold text-slate-800">التحقق من تطابق المصادر (دون جمع):</span>
             <span className="text-slate-600">
-              VF05N (2): <strong className="font-num text-slate-900">{formatEGP(sourceComparison.vf05n.salesTotal)}</strong>{' '}
+              VF05N (2): إجمالي <strong className="font-num text-slate-900">{formatEGP(sourceComparison.vf05n.salesTotal)}</strong>{' '}
+              · صافي <strong className="font-num text-teal-800">{formatEGP(sourceComparison.vf05n.netSalesTotal ?? 0)}</strong>{' '}
               · الضريبة: <strong className="font-num text-slate-800">{formatEGP(sourceComparison.vf05n.taxTotal)}</strong>{' '}
               ({formatNum(sourceComparison.vf05n.count)} سجل)
             </span>
             <span className="text-slate-300" aria-hidden="true">|</span>
             <span className="text-slate-600">
-              Zsales_Price (2): <strong className="font-num text-slate-900">{formatEGP(sourceComparison.zsales.salesTotal)}</strong>{' '}
+              Zsales_Price (2): إجمالي <strong className="font-num text-slate-900">{formatEGP(sourceComparison.zsales.salesTotal)}</strong>{' '}
+              · صافي <strong className="font-num text-teal-800">{formatEGP(sourceComparison.zsales.netSalesTotal ?? 0)}</strong>{' '}
               · الضريبة: <strong className="font-num text-slate-800">{formatEGP(sourceComparison.zsales.taxTotal)}</strong>{' '}
               ({formatNum(sourceComparison.zsales.count)} سجل)
             </span>

@@ -43,6 +43,7 @@ import type {
   ItemCategoriesAnalyticsResponse,
   ItemCategoryAnalysisRow,
   RepMetricRow,
+  RepTargetMode,
   SalesSource,
   SectorMetricRow,
   TimelinePoint,
@@ -140,9 +141,11 @@ export default function App() {
     branches: BranchMetricRow[];
     unlinkedRecords: UnlinkedRecordRow[];
     totalUnlinkedSales: number;
+    totalUnlinkedNetSales?: number;
     totalUnlinkedCount: number;
   } | null>(null);
   const [repsData, setRepsData] = useState<RepMetricRow[]>([]);
+  const [repsTargetMode, setRepsTargetMode] = useState<RepTargetMode>('auto');
   const [itemCategoriesData, setItemCategoriesData] = useState<ItemCategoriesAnalyticsResponse | null>(null);
   const [competitionsData, setCompetitionsData] = useState<CompetitionAnalyticsResponse | null>(null);
   const [selectedCompetitionId, setSelectedCompetitionId] = useState<number | null>(null);
@@ -317,12 +320,18 @@ export default function App() {
             branches: BranchMetricRow[];
             unlinkedRecords: UnlinkedRecordRow[];
             totalUnlinkedSales: number;
+            totalUnlinkedNetSales?: number;
             totalUnlinkedCount: number;
           }>(`/api/analytics/branches?${qs}`);
           if (active) setBranchesData(res);
         } else if (section === 'reps') {
-          const res = await apiRequest<{ reps: RepMetricRow[] }>(`/api/analytics/reps?${qs}`);
-          if (active) setRepsData(res.reps);
+          const res = await apiRequest<{ reps: RepMetricRow[]; targetMode?: RepTargetMode }>(`/api/analytics/reps?${qs}`);
+          if (active) {
+            setRepsData(res.reps);
+            if (res.targetMode === 'manual' || res.targetMode === 'auto') {
+              setRepsTargetMode(res.targetMode);
+            }
+          }
         } else if (section === 'items') {
           const res = await apiRequest<ItemCategoriesAnalyticsResponse>(`/api/analytics/items?${qs}`);
           if (active) {
@@ -366,6 +375,7 @@ export default function App() {
     setSectorsData(null);
     setBranchesData(null);
     setRepsData([]);
+    setRepsTargetMode('auto');
     setItemCategoriesData(null);
     setCompetitionsData(null);
     setTimelineData([]);
@@ -784,6 +794,7 @@ export default function App() {
               branches={branchesData?.branches ?? EMPTY_BRANCHES}
               unlinkedRecords={branchesData?.unlinkedRecords ?? EMPTY_UNLINKED}
               totalUnlinkedSales={branchesData?.totalUnlinkedSales ?? 0}
+              totalUnlinkedNetSales={branchesData?.totalUnlinkedNetSales ?? 0}
               totalUnlinkedCount={branchesData?.totalUnlinkedCount ?? 0}
               loading={loading}
               initialTab={branchesInitialTab}
@@ -799,11 +810,17 @@ export default function App() {
           {section === 'reps' && (
             <RepsView
               reps={repsData}
+              targetMode={repsTargetMode}
               source={source}
               sectorFilter={effectiveSectorFilter}
               startDate={startDate}
               endDate={endDate}
+              isAdmin={isAdmin}
+              canEditTargets={canEditTargets}
+              authorizedSectors={authorizedSectors}
               loading={loading}
+              onTargetModeChange={(nextMode) => setRepsTargetMode(nextMode)}
+              onRefresh={() => setRefreshTick((t) => t + 1)}
             />
           )}
 

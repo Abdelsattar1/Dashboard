@@ -529,6 +529,7 @@ interface ParsedSalesRow {
   repCode: string;
   quantity: number;
   salesValue: number;
+  netSalesValue: number;
   taxValue: number;
   resolvedSector: string | null;
   resolvedDepartment: string | null;
@@ -627,9 +628,10 @@ export function validateExcelBuffer(
       warnings,
       sheets: [],
       comparison: {
-        vf05n: { count: 0, salesTotal: 0, taxTotal: 0, returnCount: 0 },
-        zsales: { count: 0, salesTotal: 0, taxTotal: 0, returnCount: 0 },
+        vf05n: { count: 0, salesTotal: 0, netSalesTotal: 0, taxTotal: 0, returnCount: 0 },
+        zsales: { count: 0, salesTotal: 0, netSalesTotal: 0, taxTotal: 0, returnCount: 0 },
         salesDifference: 0,
+        netSalesDifference: 0,
         taxDifference: 0,
         isMatched: false,
       },
@@ -656,8 +658,8 @@ export function validateExcelBuffer(
   // 1. Check presence of all 9 required sheets
   const sheetTables = new Map<string, ParsedSheetTable>();
   const sheetHints: Record<string, string[]> = {
-    'VF05N (2)': ['New Growth Value BD&T', 'New Total Tax', 'Payer', 'Sold-to Party', 'Billing Date', 'Material', 'الفترة', 'الشهر', 'Period', 'Month'],
-    'Zsales_Price (2)': ['New Growth Value BD&T', 'Total Tax', 'Customer', 'Sales Emp.', 'Material', 'Billing Dt.', 'Billing Date', 'الفترة', 'الشهر', 'Period', 'Month'],
+    'VF05N (2)': ['New Growth Value BD&T', 'New Net Value BT', 'New Total Tax', 'Payer', 'Sold-to Party', 'Billing Date', 'Material', 'الفترة', 'الشهر', 'Period', 'Month'],
+    'Zsales_Price (2)': ['New Growth Value BD&T', 'Net Value Without TA', 'Total Tax', 'Customer', 'Sales Emp.', 'Material', 'Billing Dt.', 'Billing Date', 'الفترة', 'الشهر', 'Period', 'Month'],
     'القطاعات': ['القطاع', 'اسم القطاع', 'Sector'],
     'اهداف القطاعات': ['القطاع', 'الهدف', 'المستهدف', 'Target'],
     'تعريف المستخدمين': ['اسم المستخدم', 'المستخدم', 'الصلاحية', 'القطاع', 'القطاعات'],
@@ -1508,7 +1510,22 @@ export function validateExcelBuffer(
 
     const isZsales = sourceType === 'ZSALES';
 
-    const colSales = findColumnHeader(table.headers, ['New Growth Value BD&T', 'New Growth Value BD & T', 'New Growth Value']);
+    const colSales = findColumnHeader(table.headers, [
+      'New Growth Value BD&T',
+      'New Growth Value BD & T',
+      'New Growth Value',
+    ]);
+    const colNetSales = isZsales
+      ? findColumnHeader(table.headers, [
+          'Net Value Without TA',
+          'Net Value Without Tax',
+          'Net Value W/O TA',
+        ])
+      : findColumnHeader(table.headers, [
+          'New Net Value BT',
+          'New Net Value B&T',
+          'Net Value BT',
+        ]);
     const colTax = isZsales
       ? findColumnHeader(table.headers, [
           'Total Tax',
@@ -1604,6 +1621,16 @@ export function validateExcelBuffer(
       return records;
     }
 
+    if (!colNetSales) {
+      const expectedNetCol = isZsales ? 'Net Value Without TA' : 'New Net Value BT';
+      warnings.push({
+        severity: 'warning',
+        sheet: sheetName,
+        code: 'NET_SALES_COLUMN_NOT_FOUND',
+        message: `لم يتم العثور على عمود صافي قيمة المبيعات (${expectedNetCol}) في ورقة ${sheetName}، سيتم احتساب صافي قيمة المبيعات كـ 0 لهذه الورقة.`,
+      });
+    }
+
     if (!colTax) {
       warnings.push({
         severity: 'warning',
@@ -1624,11 +1651,25 @@ export function validateExcelBuffer(
     }
 
     let invalidSalesRows = 0;
+    let invalidNetSalesRows = 0;
     for (const row of table.rows) {
       const salesNum = readCellAsNumber(row[colSales!]);
       if (salesNum === null) {
         invalidSalesRows++;
         continue;
+      }
+      let netSalesNum = 0;
+      if (colNetSales) {
+        const netCell = row[colNetSales];
+        const hasNetContent = netCell !== undefined && netCell.v !== undefined && netCell.v !== null && String(netCell.v).trim() !== '';
+        if (hasNetContent) {
+          const parsedNet = readCellAsNumber(netCell);
+          if (parsedNet === null) {
+            invalidNetSalesRows++;
+            continue;
+          }
+          netSalesNum = parsedNet;
+        }
       }
       const taxNum = colTax ? (readCellAsNumber(row[colTax]) ?? 0) : 0;
       const qtyNum = colQty ? (readCellAsNumber(row[colQty]) ?? 0) : 0;
@@ -1679,6 +1720,7 @@ export function validateExcelBuffer(
         repCode: effectiveRepCode,
         quantity: qtyNum,
         salesValue: salesNum,
+        netSalesValue: netSalesNum,
         taxValue: taxNum,
         resolvedSector: chainMatch ? chainMatch.sectorName : null,
         resolvedDepartment: chainMatch ? chainMatch.departmentName : null,
@@ -1697,7 +1739,15 @@ export function validateExcelBuffer(
         severity: 'error',
         sheet: sheetName,
         code: 'INVALID_SALES_VALUES',
-        message: `تم العثور على ${invalidSalesRows} صفوف تحتوي على قيم غير رقمية في عمود New Growth Value BD&T داخل ورقة ${sheetName}.`,
+        message: `تم العثور على ${invalidSalesRows} صفوف تحتوي على قيم غير رقمية في عمود ${colSales} داخل ورقة ${sheetName}.`,
+      });
+    }
+    if (invalidNetSalesRows > 0) {
+      errors.push({
+        severity: 'error',
+        sheet: sheetName,
+        code: 'INVALID_NET_SALES_VALUES',
+        message: `تم العثور على ${invalidNetSalesRows} صفوف تحتوي على قيم غير رقمية في عمود ${colNetSales} داخل ورقة ${sheetName}.`,
       });
     }
 
@@ -1709,16 +1759,19 @@ export function validateExcelBuffer(
 
   const summarizeRows = (rows: ParsedSalesRow[]) => {
     let salesTotal = 0;
+    let netSalesTotal = 0;
     let taxTotal = 0;
     let returnCount = 0;
     for (const r of rows) {
       salesTotal += r.salesValue;
+      netSalesTotal += r.netSalesValue;
       taxTotal += r.taxValue;
       if (r.salesValue < 0) returnCount++;
     }
     return {
       count: rows.length,
       salesTotal: Number(salesTotal.toFixed(2)),
+      netSalesTotal: Number(netSalesTotal.toFixed(2)),
       taxTotal: Number(taxTotal.toFixed(2)),
       returnCount,
     };
@@ -1727,6 +1780,7 @@ export function validateExcelBuffer(
   const vf05nSum = summarizeRows(vf05nRows);
   const zsalesSum = summarizeRows(zsalesRows);
   const salesDiff = Number((vf05nSum.salesTotal - zsalesSum.salesTotal).toFixed(2));
+  const netSalesDiff = Number((vf05nSum.netSalesTotal - zsalesSum.netSalesTotal).toFixed(2));
   const taxDiff = Number((vf05nSum.taxTotal - zsalesSum.taxTotal).toFixed(2));
   const isMatched = Math.abs(salesDiff) <= 0.05 && vf05nSum.count > 0 && zsalesSum.count > 0;
 
@@ -1814,16 +1868,20 @@ export function validateExcelBuffer(
       period: key,
       vf05nCount: 0,
       vf05nSalesTotal: 0,
+      vf05nNetSalesTotal: 0,
       zsalesCount: 0,
       zsalesSalesTotal: 0,
+      zsalesNetSalesTotal: 0,
       action: existingPeriodSet.has(key) ? ('replace' as const) : ('add' as const),
     };
     if (r.sourceType === 'VF05N') {
       cur.vf05nCount += 1;
       cur.vf05nSalesTotal = Number((cur.vf05nSalesTotal + r.salesValue).toFixed(2));
+      cur.vf05nNetSalesTotal = Number((cur.vf05nNetSalesTotal + r.netSalesValue).toFixed(2));
     } else {
       cur.zsalesCount += 1;
       cur.zsalesSalesTotal = Number((cur.zsalesSalesTotal + r.salesValue).toFixed(2));
+      cur.zsalesNetSalesTotal = Number((cur.zsalesNetSalesTotal + r.netSalesValue).toFixed(2));
     }
     periodMap.set(key, cur);
   }
@@ -1851,6 +1909,7 @@ export function validateExcelBuffer(
       vf05n: vf05nSum,
       zsales: zsalesSum,
       salesDifference: salesDiff,
+      netSalesDifference: netSalesDiff,
       taxDifference: taxDiff,
       isMatched,
     },
@@ -2146,7 +2205,7 @@ export function commitValidatedImport(
       const prevSalesRows = db
         .prepare(
           `SELECT source_type, doc_number, billing_date, payer_code, payer_name,
-                  sold_to_code, sold_to_name, item_code, item_name, rep_code, quantity, sales_value, tax_value,
+                  sold_to_code, sold_to_name, item_code, item_name, rep_code, quantity, sales_value, net_sales_value, tax_value,
                   resolved_sector, resolved_department, resolved_chain_name,
                   resolved_branch_code, resolved_branch_name, resolved_rep_code, resolved_rep_name, resolved_item_name,
                   is_return
@@ -2165,6 +2224,7 @@ export function commitValidatedImport(
         rep_code: string | null;
         quantity: number;
         sales_value: number;
+        net_sales_value: number;
         tax_value: number;
         resolved_sector: string | null;
         resolved_department: string | null;
@@ -2217,6 +2277,7 @@ export function commitValidatedImport(
           repCode: effectiveRepCode,
           quantity: r.quantity,
           salesValue: r.sales_value,
+          netSalesValue: r.net_sales_value ?? 0,
           taxValue: r.tax_value,
           resolvedSector: chainMatch ? chainMatch.sectorName : r.resolved_sector,
           resolvedDepartment: chainMatch ? chainMatch.departmentName : r.resolved_department,
@@ -2241,9 +2302,11 @@ export function commitValidatedImport(
 
     let vf05nCount = 0;
     let vf05nSalesTotal = 0;
+    let vf05nNetSalesTotal = 0;
     let vf05nTaxTotal = 0;
     let zsalesCount = 0;
     let zsalesSalesTotal = 0;
+    let zsalesNetSalesTotal = 0;
     let zsalesTaxTotal = 0;
     let unlinkedBranchCount = 0;
     let unlinkedSectorCount = 0;
@@ -2252,19 +2315,23 @@ export function commitValidatedImport(
       if (r.sourceType === 'VF05N') {
         vf05nCount++;
         vf05nSalesTotal += r.salesValue;
+        vf05nNetSalesTotal += r.netSalesValue;
         vf05nTaxTotal += r.taxValue;
         if (!r.resolvedBranchCode) unlinkedBranchCount++;
         if (!r.resolvedSector) unlinkedSectorCount++;
       } else {
         zsalesCount++;
         zsalesSalesTotal += r.salesValue;
+        zsalesNetSalesTotal += r.netSalesValue;
         zsalesTaxTotal += r.taxValue;
       }
     }
 
     vf05nSalesTotal = Number(vf05nSalesTotal.toFixed(2));
+    vf05nNetSalesTotal = Number(vf05nNetSalesTotal.toFixed(2));
     vf05nTaxTotal = Number(vf05nTaxTotal.toFixed(2));
     zsalesSalesTotal = Number(zsalesSalesTotal.toFixed(2));
+    zsalesNetSalesTotal = Number(zsalesNetSalesTotal.toFixed(2));
     zsalesTaxTotal = Number(zsalesTaxTotal.toFixed(2));
 
     const finalReport: ImportValidationReport = {
@@ -2289,10 +2356,10 @@ export function commitValidatedImport(
       .prepare(
         `INSERT INTO import_batches (
           batch_uuid, filename, imported_by_id, imported_by_name, status,
-          vf05n_count, vf05n_sales_total, vf05n_tax_total,
-          zsales_count, zsales_sales_total, zsales_tax_total,
+          vf05n_count, vf05n_sales_total, vf05n_net_sales_total, vf05n_tax_total,
+          zsales_count, zsales_sales_total, zsales_net_sales_total, zsales_tax_total,
           unlinked_branch_count, unlinked_sector_count, has_category_targets_sheet, validation_report, created_at
-        ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         batchUuid,
@@ -2301,9 +2368,11 @@ export function commitValidatedImport(
         user.fullName,
         vf05nCount,
         vf05nSalesTotal,
+        vf05nNetSalesTotal,
         vf05nTaxTotal,
         zsalesCount,
         zsalesSalesTotal,
+        zsalesNetSalesTotal,
         zsalesTaxTotal,
         unlinkedBranchCount,
         unlinkedSectorCount,
@@ -2381,11 +2450,11 @@ export function commitValidatedImport(
       `INSERT INTO sales_records (
         batch_id, source_type, doc_number, billing_date,
         payer_code, payer_name, sold_to_code, sold_to_name,
-        item_code, item_name, rep_code, quantity, sales_value, tax_value,
+        item_code, item_name, rep_code, quantity, sales_value, net_sales_value, tax_value,
         resolved_sector, resolved_department, resolved_chain_name,
         resolved_branch_code, resolved_branch_name, resolved_rep_code, resolved_rep_name, resolved_item_name,
         is_return
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
 
     for (const rec of allSalesRecords) {
@@ -2403,6 +2472,7 @@ export function commitValidatedImport(
         rec.repCode,
         rec.quantity,
         rec.salesValue,
+        rec.netSalesValue,
         rec.taxValue,
         rec.resolvedSector,
         rec.resolvedDepartment,
@@ -2424,9 +2494,11 @@ export function commitValidatedImport(
       status: 'active' as const,
       vf05nCount,
       vf05nSalesTotal,
+      vf05nNetSalesTotal,
       vf05nTaxTotal,
       zsalesCount,
       zsalesSalesTotal,
+      zsalesNetSalesTotal,
       zsalesTaxTotal,
       unlinkedBranchCount,
       unlinkedSectorCount,
@@ -2448,9 +2520,11 @@ export function rollbackToBatch(db: Database.Database, batchId: number): ImportB
         imported_by_name: string;
         vf05n_count: number;
         vf05n_sales_total: number;
+        vf05n_net_sales_total?: number;
         vf05n_tax_total: number;
         zsales_count: number;
         zsales_sales_total: number;
+        zsales_net_sales_total?: number;
         zsales_tax_total: number;
         unlinked_branch_count: number;
         unlinked_sector_count: number;
@@ -2476,9 +2550,11 @@ export function rollbackToBatch(db: Database.Database, batchId: number): ImportB
     status: 'active',
     vf05nCount: target.vf05n_count,
     vf05nSalesTotal: target.vf05n_sales_total,
+    vf05nNetSalesTotal: target.vf05n_net_sales_total ?? 0,
     vf05nTaxTotal: target.vf05n_tax_total,
     zsalesCount: target.zsales_count,
     zsalesSalesTotal: target.zsales_sales_total,
+    zsalesNetSalesTotal: target.zsales_net_sales_total ?? 0,
     zsalesTaxTotal: target.zsales_tax_total,
     unlinkedBranchCount: target.unlinked_branch_count,
     unlinkedSectorCount: target.unlinked_sector_count,
@@ -2491,10 +2567,10 @@ export function generateStandardTemplateWorkbook(): Uint8Array {
 
   const sheetsData: Record<string, string[][]> = {
     'VF05N (2)': [
-      ['Billing Document', 'Billing Date', 'Payer', 'Name of Payer', 'Sold-to Party', 'Name of Sold-to Party', 'Material', 'Material Description', 'Sales Employee', 'Billed Quantity', 'New Growth Value BD&T', 'New Total Tax'],
+      ['Billing Document', 'Billing Date', 'Payer', 'Name of Payer', 'Sold-to Party', 'Name of Sold-to Party', 'Material', 'Material Description', 'Sales Employee', 'Billed Quantity', 'New Growth Value BD&T', 'New Net Value BT', 'New Total Tax'],
     ],
     'Zsales_Price (2)': [
-      ['Billing Document', 'Billing Date', 'Customer', 'Customer Name', 'Material', 'Material Description', 'Sales Emp.', 'Billed Quantity', 'New Growth Value BD&T', 'Total Tax'],
+      ['Billing Document', 'Billing Dt.', 'Customer', 'Customer Name', 'Material', 'Material Description', 'Sales Emp.', 'Billed Quantity', 'New Growth Value BD&T', 'Net Value Without TA', 'Total Tax'],
     ],
     'القطاعات': [['كود القطاع', 'القطاع']],
     'اهداف القطاعات': [['القطاع', 'الهدف']],

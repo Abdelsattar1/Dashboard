@@ -301,7 +301,7 @@ export function runSmartAudit(
   if (activeBatch) {
     const badSalesRows = db
       .prepare(
-        `SELECT id, source_type, quantity, sales_value, tax_value
+        `SELECT id, source_type, quantity, sales_value, net_sales_value, tax_value
          FROM sales_records
          WHERE batch_id = ?`
       )
@@ -310,11 +310,12 @@ export function runSmartAudit(
       source_type: string;
       quantity: unknown;
       sales_value: unknown;
+      net_sales_value: unknown;
       tax_value: unknown;
     }>;
     for (const r of badSalesRows) {
-      if (isBadNumber(r.quantity) || isBadNumber(r.sales_value) || isBadNumber(r.tax_value)) {
-        badDbNumericDetails.push(`sales_records#${r.id} (${r.source_type}): qty=${r.quantity}, sales=${r.sales_value}, tax=${r.tax_value}`);
+      if (isBadNumber(r.quantity) || isBadNumber(r.sales_value) || isBadNumber(r.net_sales_value) || isBadNumber(r.tax_value)) {
+        badDbNumericDetails.push(`sales_records#${r.id} (${r.source_type}): qty=${r.quantity}, sales=${r.sales_value}, net=${r.net_sales_value}, tax=${r.tax_value}`);
         if (badDbNumericDetails.length >= 20) break;
       }
     }
@@ -336,6 +337,19 @@ export function runSmartAudit(
     if (isBadNumber(ct.target_value) || Number(ct.target_value) < 0) {
       badDbNumericDetails.push(`item_category_targets#${ct.id} (${ct.target_key}): target=${ct.target_value}`);
     }
+  }
+
+  try {
+    const badRepManualTargets = db
+      .prepare(`SELECT id, rep_code, target_value FROM rep_manual_targets`)
+      .all() as Array<{ id: number; rep_code: string; target_value: unknown }>;
+    for (const rmt of badRepManualTargets) {
+      if (isBadNumber(rmt.target_value) || Number(rmt.target_value) < 0) {
+        badDbNumericDetails.push(`rep_manual_targets#${rmt.id} (${rmt.rep_code}): target=${rmt.target_value}`);
+      }
+    }
+  } catch {
+    // ignore if table not present
   }
 
   const badCompTargets = db
@@ -1020,12 +1034,13 @@ export function executeAutoFix(
     if (actionType === 'FIX_NON_FINITE_NUMBERS') {
       const snapshot = {
         salesRows: activeBatch
-          ? db.prepare(`SELECT id, quantity, sales_value, tax_value FROM sales_records WHERE batch_id = ?`).all(activeBatch.id)
+          ? db.prepare(`SELECT id, quantity, sales_value, net_sales_value, tax_value FROM sales_records WHERE batch_id = ?`).all(activeBatch.id)
           : [],
         branches: activeBatch
           ? db.prepare(`SELECT id, branch_target FROM branches WHERE batch_id = ?`).all(activeBatch.id)
           : [],
         itemCategoryTargets: db.prepare(`SELECT id, target_value FROM item_category_targets`).all(),
+        repManualTargets: db.prepare(`SELECT id, target_value FROM rep_manual_targets`).all(),
         competitionTargets: db
           .prepare(`SELECT id, target_qty, industrial_target_qty, commercial_target_qty FROM competition_targets`)
           .all(),
@@ -1034,11 +1049,12 @@ export function executeAutoFix(
 
       let fixedCount = 0;
       if (activeBatch) {
-        for (const r of snapshot.salesRows as Array<{ id: number; quantity: unknown; sales_value: unknown; tax_value: unknown }>) {
-          if (isBadNumber(r.quantity) || isBadNumber(r.sales_value) || isBadNumber(r.tax_value)) {
-            db.prepare(`UPDATE sales_records SET quantity = ?, sales_value = ?, tax_value = ? WHERE id = ?`).run(
+        for (const r of snapshot.salesRows as Array<{ id: number; quantity: unknown; sales_value: unknown; net_sales_value: unknown; tax_value: unknown }>) {
+          if (isBadNumber(r.quantity) || isBadNumber(r.sales_value) || isBadNumber(r.net_sales_value) || isBadNumber(r.tax_value)) {
+            db.prepare(`UPDATE sales_records SET quantity = ?, sales_value = ?, net_sales_value = ?, tax_value = ? WHERE id = ?`).run(
               isBadNumber(r.quantity) ? 0 : Number(r.quantity),
               isBadNumber(r.sales_value) ? 0 : Number(r.sales_value),
+              isBadNumber(r.net_sales_value) ? 0 : Number(r.net_sales_value),
               isBadNumber(r.tax_value) ? 0 : Number(r.tax_value),
               r.id
             );
@@ -1055,6 +1071,12 @@ export function executeAutoFix(
       for (const ct of snapshot.itemCategoryTargets as Array<{ id: number; target_value: unknown }>) {
         if (isBadNumber(ct.target_value) || Number(ct.target_value) < 0) {
           db.prepare(`UPDATE item_category_targets SET target_value = 0 WHERE id = ?`).run(ct.id);
+          fixedCount++;
+        }
+      }
+      for (const rmt of snapshot.repManualTargets as Array<{ id: number; target_value: unknown }>) {
+        if (isBadNumber(rmt.target_value) || Number(rmt.target_value) < 0) {
+          db.prepare(`UPDATE rep_manual_targets SET target_value = 0 WHERE id = ?`).run(rmt.id);
           fixedCount++;
         }
       }
@@ -1371,10 +1393,11 @@ export function rollbackAutoFix(
 
   const tx = db.transaction(() => {
     if (backup.action_type === 'FIX_NON_FINITE_NUMBERS') {
-      for (const r of (snap.salesRows as Array<{ id: number; quantity: number; sales_value: number; tax_value: number }>) || []) {
-        db.prepare(`UPDATE sales_records SET quantity = ?, sales_value = ?, tax_value = ? WHERE id = ?`).run(
+      for (const r of (snap.salesRows as Array<{ id: number; quantity: number; sales_value: number; net_sales_value?: number; tax_value: number }>) || []) {
+        db.prepare(`UPDATE sales_records SET quantity = ?, sales_value = ?, net_sales_value = ?, tax_value = ? WHERE id = ?`).run(
           r.quantity,
           r.sales_value,
+          r.net_sales_value ?? 0,
           r.tax_value,
           r.id
         );
@@ -1384,6 +1407,9 @@ export function rollbackAutoFix(
       }
       for (const ct of (snap.itemCategoryTargets as Array<{ id: number; target_value: number }>) || []) {
         db.prepare(`UPDATE item_category_targets SET target_value = ? WHERE id = ?`).run(ct.target_value, ct.id);
+      }
+      for (const rmt of (snap.repManualTargets as Array<{ id: number; target_value: number }>) || []) {
+        db.prepare(`UPDATE rep_manual_targets SET target_value = ? WHERE id = ?`).run(rmt.target_value, rmt.id);
       }
       for (const cp of (snap.competitionTargets as Array<{
         id: number;

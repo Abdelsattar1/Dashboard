@@ -11,7 +11,10 @@ import {
   getDepartmentsChainsBreakdown,
   getItemCategoriesAnalytics,
   getRepsAnalytics,
+  getSavedRepTargetMode,
   saveItemCategoryTargets,
+  saveRepManualTargets,
+  saveRepTargetMode,
 } from '../server/analytics-engine.ts';
 import {
   AuthorizationError,
@@ -2866,7 +2869,346 @@ function runTests() {
   const novReplaced = getDashboardSummary(incDb, adminUser, { source: 'VF05N', startDate: '2026-11-01', endDate: '2026-11-30' });
   assert.equal(novReplaced.kpis.privateMarketsSales, 25000, 'November data must reflect replaced 25,000');
 
-  console.log('All Sales BI Engine tests PASSED (24/24 assertion groups verified).');
+  // =========================================================================
+  // 25. Dual Sales Metrics in Cards:
+  //     - Old calculation preserved: sales / privateMarketsSales / targets / achievements
+  //       strictly read "New Growth Value BD&T" ("إجمالي قيمة المبيعات")
+  //     - New calculation added alongside: netSales / privateMarketsNetSales
+  //       strictly read "New Net Value BT" (VF05N) & "Net Value Without TA" (ZSALES) ("صافي قيمة المبيعات")
+  //     - Single-sector, All-sector, Branch-level Cards, Monthly Replacement, Master Upsert & SQL
+  // =========================================================================
+  const netDb = createSeededTestDb();
+  const buildDualSalesWb = (opts: {
+    vfDirectGross: number;
+    vfCentralGross: number;
+    vfDirectNet: number;
+    vfCentralNet: number;
+    zsDirectGross: number;
+    zsCentralGross: number;
+    zsDirectNet: number;
+    zsCentralNet: number;
+    billingDateStr: string;
+    billingDtStr: string;
+  }) => {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet([
+        ['كود القطاع', 'القطاع'],
+        ['S1', 'التوريد المباشر'],
+        ['S2', 'التوريد المركزي'],
+      ]),
+      'القطاعات'
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet([
+        ['القطاع', 'الهدف'],
+        ['التوريد المباشر', 200000],
+        ['التوريد المركزي', 150000],
+      ]),
+      'اهداف القطاعات'
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet([
+        ['كود السلسلة', 'اسم السلسلة', 'الادارة', 'اسم المشرف', 'القطاع'],
+        ['0064000021', 'سلسلة المباشر', 'إدارة المباشر', 'مشرف 1', 'التوريد المباشر'],
+        ['0064000022', 'سلسلة المركزي', 'إدارة المركزي', 'مشرف 2', 'التوريد المركزي'],
+      ]),
+      'تعريف الادارات والقطاعات'
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet([
+        ['كود الفرع', 'اسم الفرع', 'القطاع', 'كود الادارة', 'اسم الادارة', 'كود المندوب', 'اسم المندوب', 'اسم المشرف', 'الهدف'],
+        ['0064000901', 'فرع مباشر 1', 'التوريد المباشر', '0064000021', 'سلسلة المباشر', '501', 'مندوب 1', 'مشرف 1', 100000],
+        ['0064000902', 'فرع مركزي 1', 'التوريد المركزي', '0064000022', 'سلسلة المركزي', '502', 'مندوب 2', 'مشرف 2', 100000],
+      ]),
+      'تعريف الفروع و الاهداف'
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet([
+        ['كود المندوب', 'اسم المندوب', 'القطاع'],
+        ['501', 'مندوب 1', 'التوريد المباشر'],
+        ['502', 'مندوب 2', 'التوريد المركزي'],
+      ]),
+      'تعريف مندوبى البيع'
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet([
+        ['كود الصنف', 'اسم الصنف', 'التصنيف A'],
+        ['ITM-N1', 'صنف صافي 1', 'تجارى'],
+      ]),
+      'تعريف الاصناف'
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet([
+        ['اسم المستخدم', 'الصلاحيات'],
+        ['u1', 'الكل'],
+      ]),
+      'تعريف المستخدمين'
+    );
+    // Both "New Growth Value BD&T" (old method) AND "New Net Value BT" (new method)
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet([
+        ['Sold-to Party', 'Payer', 'Billing Date', 'Material', 'Sales Employee Code', 'New Total Tax', 'New Growth Value BD&T', 'New Net Value BT'],
+        ['0064000901', '0064000021', opts.billingDateStr, 'ITM-N1', '501', 140, opts.vfDirectGross, opts.vfDirectNet],
+        ['0064000902', '0064000022', opts.billingDateStr, 'ITM-N1', '502', 200, opts.vfCentralGross, opts.vfCentralNet],
+      ]),
+      'VF05N (2)'
+    );
+    // Both "New Growth Value BD&T" (old method) AND "Net Value Without TA" (new method)
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet([
+        ['Billing Dt.', 'Customer', 'Material', 'Sales Emp.', 'Qty', 'Total Tax', 'New Growth Value BD&T', 'Net Value Without TA'],
+        [opts.billingDtStr, '0064000021', 'ITM-N1', '501', 10, 140, opts.zsDirectGross, opts.zsDirectNet],
+        [opts.billingDtStr, '0064000022', 'ITM-N1', '502', 20, 200, opts.zsCentralGross, opts.zsCentralNet],
+      ]),
+      'Zsales_Price (2)'
+    );
+    return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  };
+
+  const netNovBuf = buildDualSalesWb({
+    vfDirectGross: 25000,
+    vfCentralGross: 15000,
+    vfDirectNet: 12000,
+    vfCentralNet: 8000,
+    zsDirectGross: 26000,
+    zsCentralGross: 16000,
+    zsDirectNet: 12500,
+    zsCentralNet: 8500,
+    billingDateStr: '2026-11-10',
+    billingDtStr: '10.11.2026',
+  });
+  const netNovReport = validateExcelBuffer(netNovBuf, 'Dual_Sales_Nov.xlsx', getActiveSalesPeriods(netDb));
+  assert.equal(netNovReport.canCommit, true);
+  assert.equal(netNovReport.comparison.vf05n.salesTotal, 40000);
+  assert.equal(netNovReport.comparison.vf05n.netSalesTotal, 20000);
+  assert.equal(netNovReport.comparison.zsales.salesTotal, 42000);
+  assert.equal(netNovReport.comparison.zsales.netSalesTotal, 21000);
+  commitValidatedImport(netDb, netNovReport.validationToken, { id: 1, fullName: 'مدير النظام' });
+
+  // Verify VF05N keeps old sales from "New Growth Value BD&T" (25000+15000=40000) AND netSales from "New Net Value BT" (12000+8000=20000)
+  const netDashVfAll = getDashboardSummary(netDb, adminUser, { source: 'VF05N', sector: 'ALL' });
+  assert.equal(netDashVfAll.kpis.privateMarketsSales, 40000);
+  assert.equal(netDashVfAll.kpis.privateMarketsNetSales, 20000);
+  assert.equal(netDashVfAll.kpis.directAndArmySales, 25000);
+  assert.equal(netDashVfAll.kpis.directAndArmyNetSales, 12000);
+  assert.equal(netDashVfAll.kpis.chainsSectorSales, 40000);
+  assert.equal(netDashVfAll.kpis.chainsSectorNetSales, 20000);
+  // Achievement % and variance must still be calculated from the old method ("New Growth Value BD&T")
+  assert.equal(netDashVfAll.kpis.privateMarketsVariance, 40000 - 350000);
+  assert.equal(
+    netDashVfAll.kpis.privateMarketsAchievementPct,
+    calculateAchievementPct(40000, 350000, 340)
+  );
+  assert.equal(netDashVfAll.sectors.find((s) => s.sectorName === 'التوريد المباشر')!.sales, 25000);
+  assert.equal(netDashVfAll.sectors.find((s) => s.sectorName === 'التوريد المباشر')!.netSales, 12000);
+  assert.equal(netDashVfAll.sectors.find((s) => s.sectorName === 'التوريد المركزي')!.sales, 15000);
+  assert.equal(netDashVfAll.sectors.find((s) => s.sectorName === 'التوريد المركزي')!.netSales, 8000);
+
+  // Verify single-sector filter dynamically aggregates BOTH values for that sector
+  const netDashVfDirect = getDashboardSummary(netDb, adminUser, { source: 'VF05N', sector: 'التوريد المباشر' });
+  assert.equal(netDashVfDirect.kpis.privateMarketsSales, 25000);
+  assert.equal(netDashVfDirect.kpis.privateMarketsNetSales, 12000);
+  assert.equal(netDashVfDirect.sectors.length, 1);
+
+  // Verify branch totals carry BOTH sales (old) and netSales (new)
+  const netBranchesVf = getBranchesAnalytics(netDb, adminUser, { source: 'VF05N', sector: 'ALL' }).branches;
+  assert.equal(netBranchesVf.reduce((acc, b) => acc + b.sales, 0), 40000);
+  assert.equal(netBranchesVf.reduce((acc, b) => acc + b.netSales, 0), 20000);
+  assert.equal(netBranchesVf.find((b) => b.branchCode === '0064000901')!.sales, 25000);
+  assert.equal(netBranchesVf.find((b) => b.branchCode === '0064000901')!.netSales, 12000);
+  assert.equal(netBranchesVf.find((b) => b.branchCode === '0064000902')!.sales, 15000);
+  assert.equal(netBranchesVf.find((b) => b.branchCode === '0064000902')!.netSales, 8000);
+
+  // Verify ZSALES keeps old sales from "New Growth Value BD&T" (26000+16000=42000) AND netSales from "Net Value Without TA" (12500+8500=21000)
+  const netDashZsAll = getDashboardSummary(netDb, adminUser, { source: 'ZSALES', sector: 'ALL' });
+  assert.equal(netDashZsAll.kpis.privateMarketsSales, 42000);
+  assert.equal(netDashZsAll.kpis.privateMarketsNetSales, 21000);
+  assert.equal(netDashZsAll.kpis.directAndArmySales, 26000);
+  assert.equal(netDashZsAll.kpis.directAndArmyNetSales, 12500);
+  const netChainsZs = getDepartmentsChainsBreakdown(netDb, adminUser, { source: 'ZSALES', sector: 'التوريد المركزي' });
+  assert.equal(netChainsZs.reduce((acc, c) => acc + c.sales, 0), 16000);
+  assert.equal(netChainsZs.reduce((acc, c) => acc + c.netSales, 0), 8500);
+
+  // Add December 2026 (`2026-12`), verify cumulative totals for BOTH, then replace November (`2026-11`) only
+  const netDecBuf = buildDualSalesWb({
+    vfDirectGross: 10000,
+    vfCentralGross: 6000,
+    vfDirectNet: 5000,
+    vfCentralNet: 3000,
+    zsDirectGross: 11000,
+    zsCentralGross: 7000,
+    zsDirectNet: 5500,
+    zsCentralNet: 3500,
+    billingDateStr: '2026-12-05',
+    billingDtStr: '05.12.2026',
+  });
+  const netDecReport = validateExcelBuffer(netDecBuf, 'Dual_Sales_Dec.xlsx', getActiveSalesPeriods(netDb));
+  assert.equal(netDecReport.periodsDetected?.[0].period, '2026-12');
+  assert.equal(netDecReport.periodsDetected?.[0].action, 'add');
+  commitValidatedImport(netDb, netDecReport.validationToken, { id: 1, fullName: 'مدير النظام' });
+
+  assert.equal(getDashboardSummary(netDb, adminUser, { source: 'VF05N' }).kpis.privateMarketsSales, 56000);
+  assert.equal(getDashboardSummary(netDb, adminUser, { source: 'VF05N' }).kpis.privateMarketsNetSales, 28000);
+  assert.equal(getDashboardSummary(netDb, adminUser, { source: 'ZSALES' }).kpis.privateMarketsSales, 60000);
+  assert.equal(getDashboardSummary(netDb, adminUser, { source: 'ZSALES' }).kpis.privateMarketsNetSales, 30000);
+
+  // Replace 2026-11 with corrected values -> 2026-12 must stay intact for BOTH metrics!
+  const netNovFixBuf = buildDualSalesWb({
+    vfDirectGross: 30000,
+    vfCentralGross: 20000,
+    vfDirectNet: 14000,
+    vfCentralNet: 9000,
+    zsDirectGross: 31000,
+    zsCentralGross: 21000,
+    zsDirectNet: 14500,
+    zsCentralNet: 9500,
+    billingDateStr: '2026-11-22',
+    billingDtStr: '22.11.2026',
+  });
+  const netNovFixReport = validateExcelBuffer(netNovFixBuf, 'Dual_Sales_Nov_Fix.xlsx', getActiveSalesPeriods(netDb));
+  assert.equal(netNovFixReport.periodsDetected?.[0].action, 'replace');
+  commitValidatedImport(netDb, netNovFixReport.validationToken, { id: 1, fullName: 'مدير النظام' });
+
+  // VF05N cumulative gross = (30000+20000) + (10000+6000) = 66000; net = (14000+9000) + (5000+3000) = 31000
+  assert.equal(getDashboardSummary(netDb, adminUser, { source: 'VF05N' }).kpis.privateMarketsSales, 66000);
+  assert.equal(getDashboardSummary(netDb, adminUser, { source: 'VF05N' }).kpis.privateMarketsNetSales, 31000);
+  // ZSALES cumulative gross = (31000+21000) + (11000+7000) = 70000; net = (14500+9500) + (5500+3500) = 33000
+  assert.equal(getDashboardSummary(netDb, adminUser, { source: 'ZSALES' }).kpis.privateMarketsSales, 70000);
+  assert.equal(getDashboardSummary(netDb, adminUser, { source: 'ZSALES' }).kpis.privateMarketsNetSales, 33000);
+  assert.equal(
+    getDashboardSummary(netDb, adminUser, { source: 'VF05N', startDate: '2026-12-01', endDate: '2026-12-31' }).kpis.privateMarketsSales,
+    16000
+  );
+  assert.equal(
+    getDashboardSummary(netDb, adminUser, { source: 'VF05N', startDate: '2026-12-01', endDate: '2026-12-31' }).kpis.privateMarketsNetSales,
+    8000
+  );
+
+  // Verify SUPABASE_SCHEMA_SQL includes new net_sales_value columns & idempotent ALTER TABLE statements
+  assert.ok(SUPABASE_SCHEMA_SQL.includes('net_sales_value DOUBLE PRECISION'));
+  assert.ok(SUPABASE_SCHEMA_SQL.includes('vf05n_net_sales_total DOUBLE PRECISION'));
+  assert.ok(SUPABASE_SCHEMA_SQL.includes('zsales_net_sales_total DOUBLE PRECISION'));
+  assert.ok(SUPABASE_SCHEMA_SQL.includes('ADD COLUMN IF NOT EXISTS net_sales_value'));
+
+  // =========================================================================
+  // 26. Reps Auto vs Manual Target Mode Switch + Persistent Upsert + RBAC
+  // =========================================================================
+  // Default mode must be 'auto' using branch-aggregated targets
+  assert.equal(getSavedRepTargetMode(netDb), 'auto');
+  const autoRepsInit = getRepsAnalytics(netDb, adminUser, { source: 'VF05N' });
+  const rep501Auto = autoRepsInit.find((r) => r.repCode === '501')!;
+  const rep502Auto = autoRepsInit.find((r) => r.repCode === '502')!;
+  assert.equal(rep501Auto.autoTarget, 100000);
+  assert.equal(rep501Auto.manualTarget, null);
+  assert.equal(rep501Auto.target, 100000);
+  assert.equal(rep502Auto.autoTarget, 100000);
+  assert.equal(rep502Auto.target, 100000);
+
+  // Switch to 'manual' and save manual targets for rep 501 (then upsert a new value)
+  assert.equal(saveRepTargetMode(netDb, 'manual', adminUser), 'manual');
+  assert.equal(getSavedRepTargetMode(netDb), 'manual');
+
+  saveRepManualTargets(
+    netDb,
+    [{ repCode: '501', repName: 'مندوب مباشر', sectorName: 'التوريد المباشر', targetValue: 110000 }],
+    adminUser
+  );
+  // Update (Upsert) same rep_code with a revised value -> must overwrite cleanly with 1 row
+  saveRepManualTargets(
+    netDb,
+    [{ repCode: '501', repName: 'مندوب مباشر', sectorName: 'التوريد المباشر', targetValue: 125000 }],
+    adminUser
+  );
+  const manualRowCount = (netDb.prepare(`SELECT COUNT(*) AS c FROM rep_manual_targets WHERE rep_code = '501'`).get() as { c: number }).c;
+  assert.equal(manualRowCount, 1, 'Repeated manual target edit must Upsert cleanly without duplicates');
+
+  const manualReps = getRepsAnalytics(netDb, adminUser, { source: 'VF05N' });
+  const rep501Manual = manualReps.find((r) => r.repCode === '501')!;
+  const rep502Manual = manualReps.find((r) => r.repCode === '502')!;
+  assert.equal(rep501Manual.autoTarget, 100000);
+  assert.equal(rep501Manual.manualTarget, 125000);
+  assert.equal(rep501Manual.target, 125000);
+  assert.equal(rep501Manual.achievementPct, calculateAchievementPct(rep501Manual.sales, 125000, rep501Manual.tax));
+  // Unedited rep 502 keeps null manualTarget & evaluates 0 in manual mode while retaining autoTarget
+  assert.equal(rep502Manual.manualTarget, null);
+  assert.equal(rep502Manual.target, 0);
+  assert.equal(rep502Manual.autoTarget, 100000);
+  assert.equal(rep502Manual.achievementPct, null);
+
+  // Switch back to 'auto' -> must restore branch-aggregated target AND preserve saved manual value in DB!
+  assert.equal(saveRepTargetMode(netDb, 'auto', adminUser), 'auto');
+  const backToAuto = getRepsAnalytics(netDb, adminUser, { source: 'VF05N' });
+  const rep501BackAuto = backToAuto.find((r) => r.repCode === '501')!;
+  assert.equal(rep501BackAuto.target, 100000);
+  assert.equal(rep501BackAuto.manualTarget, 125000, 'Saved manual value must stay preserved while in auto mode');
+
+  // Re-import a new Excel batch -> manual value must STILL survive in DB and restore when switching back to 'manual'!
+  const repReimportReport = validateExcelBuffer(netNovFixBuf, 'Dual_Sales_Reimport_Check.xlsx', getActiveSalesPeriods(netDb));
+  commitValidatedImport(netDb, repReimportReport.validationToken, { id: 1, fullName: 'مدير النظام' });
+  assert.equal(saveRepTargetMode(netDb, 'manual', adminUser), 'manual');
+  const afterImportManual = getRepsAnalytics(netDb, adminUser, { source: 'VF05N' }).find((r) => r.repCode === '501')!;
+  assert.equal(afterImportManual.manualTarget, 125000);
+  assert.equal(afterImportManual.target, 125000);
+
+  // RBAC: standard_user cannot change mode or manual targets; sector_manager restricted to authorized sector only
+  const sectorMgrDirectUser: UserProfile = {
+    id: 99,
+    username: 'mgr.direct',
+    fullName: 'مدير مباشر',
+    email: null,
+    role: 'sector_manager',
+    allowedSectors: ['التوريد المباشر'],
+    isActive: true,
+    createdAt: '2026-11-28T00:00:00Z',
+  };
+  assert.throws(
+    () => saveRepTargetMode(netDb, 'auto', directUser),
+    (err: unknown) => err instanceof AuthorizationError
+  );
+  assert.throws(
+    () =>
+      saveRepManualTargets(
+        netDb,
+        [{ repCode: '501', repName: 'مندوب مباشر', sectorName: 'التوريد المباشر', targetValue: 99999 }],
+        directUser
+      ),
+    (err: unknown) => err instanceof AuthorizationError
+  );
+  assert.throws(
+    () =>
+      saveRepManualTargets(
+        netDb,
+        [{ repCode: '502', repName: 'مندوب مركزي', sectorName: 'التوريد المركزي', targetValue: 99999 }],
+        sectorMgrDirectUser
+      ),
+    (err: unknown) => err instanceof AuthorizationError
+  );
+  saveRepManualTargets(
+    netDb,
+    [{ repCode: '501', repName: 'مندوب مباشر', sectorName: 'التوريد المباشر', targetValue: 130000 }],
+    sectorMgrDirectUser
+  );
+  assert.equal(
+    getRepsAnalytics(netDb, adminUser, { source: 'VF05N' }).find((r) => r.repCode === '501')!.target,
+    130000
+  );
+
+  // Verify SUPABASE_SCHEMA_SQL includes new rep manual target tables, RLS & PostgREST schema reload
+  assert.ok(SUPABASE_SCHEMA_SQL.includes('CREATE TABLE IF NOT EXISTS public.rep_manual_targets'));
+  assert.ok(SUPABASE_SCHEMA_SQL.includes('CREATE TABLE IF NOT EXISTS public.app_settings'));
+  assert.ok(SUPABASE_SCHEMA_SQL.includes("NOTIFY pgrst, 'reload schema';"));
+
+  console.log('All Sales BI Engine tests PASSED (26/26 assertion groups verified).');
 }
 
 runTests();

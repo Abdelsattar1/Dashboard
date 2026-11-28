@@ -15,6 +15,7 @@ interface BranchesViewProps {
   branches: BranchMetricRow[];
   unlinkedRecords: UnlinkedRecordRow[];
   totalUnlinkedSales: number;
+  totalUnlinkedNetSales?: number;
   totalUnlinkedCount: number;
   loading: boolean;
   initialTab?: 'linked' | 'unlinked';
@@ -26,7 +27,7 @@ interface BranchesViewProps {
   onSectorChange: (sector: string) => void;
 }
 
-type SortKey = 'default' | 'chainName' | 'branchName' | 'sales' | 'tax' | 'target' | 'achievementPct';
+type SortKey = 'default' | 'chainName' | 'branchName' | 'sales' | 'netSales' | 'tax' | 'target' | 'achievementPct';
 
 function normalizeArabicText(input: string): string {
   return String(input || '')
@@ -233,16 +234,18 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
 
   const tableTotals = useMemo(() => {
     let sales = 0;
+    let netSales = 0;
     let tax = 0;
     let target = 0;
     for (const b of filteredBranches) {
       sales += b.sales;
+      netSales += b.netSales ?? 0;
       tax += b.tax;
       target += b.target;
     }
     const denom = target - tax;
     const achievementPct = target > 0 && denom > 0 ? (sales / denom) * 100 : null;
-    return { sales, tax, target, achievementPct };
+    return { sales, netSales, tax, target, achievementPct };
   }, [filteredBranches]);
 
   const filteredUnlinked = useMemo(() => {
@@ -307,12 +310,14 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
 
   const unlinkedTotals = useMemo(() => {
     let sales = 0;
+    let netSales = 0;
     let tax = 0;
     for (const r of filteredUnlinked) {
       sales += r.salesValue;
+      netSales += r.netSalesValue ?? 0;
       tax += r.taxValue;
     }
-    return { sales, tax };
+    return { sales, netSales, tax };
   }, [filteredUnlinked]);
 
   const getExportMeta = () => {
@@ -348,7 +353,8 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
       const columns: ExportColumn[] = [
         { header: 'اسم السلسلة', key: 'chainName', type: 'string', minWidth: 22 },
         { header: 'اسم الفرع', key: 'branchName', type: 'string', minWidth: 26 },
-        { header: 'المبيعات', key: 'sales', type: 'currency', minWidth: 16 },
+        { header: 'إجمالي قيمة المبيعات', key: 'sales', type: 'currency', minWidth: 16 },
+        { header: 'صافي قيمة المبيعات', key: 'netSales', type: 'currency', minWidth: 16 },
         { header: 'الضريبة', key: 'tax', type: 'currency', minWidth: 14 },
         { header: 'الهدف', key: 'target', type: 'currency', minWidth: 16 },
         { header: 'ن.التحقيق', key: 'achievementPct', type: 'percent', minWidth: 13 },
@@ -357,6 +363,7 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
         chainName: b.chainName,
         branchName: b.branchName,
         sales: b.sales,
+        netSales: b.netSales ?? 0,
         tax: b.tax,
         target: b.target,
         achievementPct: b.target > 0 && b.achievementPct !== null ? b.achievementPct : null,
@@ -367,6 +374,7 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
               chainName: 'الإجمالي',
               branchName: `${formatNum(filteredBranches.length)} فرع (${formatNum(kpis.totalWithTarget)} بهدف)`,
               sales: tableTotals.sales,
+              netSales: tableTotals.netSales,
               tax: tableTotals.tax,
               target: tableTotals.target,
               achievementPct: tableTotals.achievementPct,
@@ -381,6 +389,9 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
             title: 'الفروع — تفصيل تحليل الفروع',
             subtitle: meta.summary.join(' | '),
             summaryPairs: [
+              { label: 'إجمالي قيمة مبيعات الفروع', value: tableTotals.sales, type: 'currency' },
+              { label: 'صافي قيمة مبيعات الفروع', value: tableTotals.netSales, type: 'currency' },
+              { label: 'نسبة تحقيق الفروع', value: tableTotals.achievementPct, type: 'percent' },
               { label: 'عدد الفروع النشطة (هدف > 0)', value: kpis.activeCount, type: 'integer' },
               { label: 'نسبة الفروع النشطة', value: kpis.activePct, type: 'percent' },
               { label: 'عدد الفروع غير النشطة', value: kpis.inactiveCount, type: 'integer' },
@@ -403,7 +414,8 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
       { header: 'اسم العميل (Sold-to)', key: 'soldToName', type: 'string', minWidth: 26 },
       { header: 'Payer', key: 'payerCode', type: 'string', minWidth: 14 },
       { header: 'القطاع المرتبط', key: 'resolvedSector', type: 'string', minWidth: 18 },
-      { header: 'المبيعات', key: 'salesValue', type: 'currency', minWidth: 16 },
+      { header: 'إجمالي قيمة المبيعات', key: 'salesValue', type: 'currency', minWidth: 16 },
+      { header: 'صافي قيمة المبيعات', key: 'netSalesValue', type: 'currency', minWidth: 16 },
       { header: 'الضريبة', key: 'taxValue', type: 'currency', minWidth: 14 },
     ];
     const exportRows = filteredUnlinked.map((r) => ({
@@ -414,6 +426,7 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
       payerCode: r.payerCode || '—',
       resolvedSector: r.resolvedSector || 'غير مرتبط بقطاع',
       salesValue: r.salesValue,
+      netSalesValue: r.netSalesValue ?? 0,
       taxValue: r.taxValue,
     }));
     const totalRow =
@@ -426,6 +439,7 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
             payerCode: '',
             resolvedSector: '',
             salesValue: unlinkedTotals.sales,
+            netSalesValue: unlinkedTotals.netSales,
             taxValue: unlinkedTotals.tax,
           }
         : null;
@@ -452,7 +466,8 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
       const columns: ExportColumn[] = [
         { header: 'اسم السلسلة', key: 'chainName', type: 'string' },
         { header: 'اسم الفرع', key: 'branchName', type: 'string' },
-        { header: 'المبيعات', key: 'sales', type: 'currency' },
+        { header: 'إجمالي قيمة المبيعات', key: 'sales', type: 'currency' },
+        { header: 'صافي قيمة المبيعات', key: 'netSales', type: 'currency' },
         { header: 'الضريبة', key: 'tax', type: 'currency' },
         { header: 'الهدف', key: 'target', type: 'currency' },
         { header: 'ن.التحقيق', key: 'achievementPct', type: 'percent' },
@@ -461,6 +476,7 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
         chainName: b.chainName,
         branchName: b.branchName,
         sales: b.sales,
+        netSales: b.netSales ?? 0,
         tax: b.tax,
         target: b.target,
         achievementPct: b.target > 0 && b.achievementPct !== null ? b.achievementPct : null,
@@ -471,6 +487,7 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
               chainName: 'الإجمالي',
               branchName: `${formatNum(filteredBranches.length)} فرع (${formatNum(kpis.totalWithTarget)} بهدف)`,
               sales: tableTotals.sales,
+              netSales: tableTotals.netSales,
               tax: tableTotals.tax,
               target: tableTotals.target,
               achievementPct: tableTotals.achievementPct,
@@ -482,6 +499,18 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
         tabTitle: 'الفروع — تفصيل تحليل الفروع',
         filtersSummary: meta.summary,
         kpis: [
+          {
+            label:
+              effectiveSector !== 'ALL'
+                ? `مبيعات فروع ${effectiveSector}`
+                : 'مبيعات الفروع',
+            value: formatNum(tableTotals.sales, 2),
+            unit: 'EGP',
+            sublabel: `صافي قيمة المبيعات: ${formatEGP(tableTotals.netSales)} · الهدف ${formatNum(tableTotals.target, 0)} · التحقيق ${
+              tableTotals.achievementPct !== null ? formatPctOneDecimal(tableTotals.achievementPct) : '—'
+            }`,
+            tone: 'accent',
+          },
           {
             label: 'الفروع النشطة',
             value: `${formatNum(kpis.activeCount)} (${formatPctOneDecimal(kpis.activePct)})`,
@@ -520,7 +549,8 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
       { header: 'اسم العميل (Sold-to)', key: 'soldToName', type: 'string' },
       { header: 'Payer', key: 'payerCode', type: 'string' },
       { header: 'القطاع المرتبط', key: 'resolvedSector', type: 'string' },
-      { header: 'المبيعات', key: 'salesValue', type: 'currency' },
+      { header: 'إجمالي قيمة المبيعات', key: 'salesValue', type: 'currency' },
+      { header: 'صافي قيمة المبيعات', key: 'netSalesValue', type: 'currency' },
       { header: 'الضريبة', key: 'taxValue', type: 'currency' },
     ];
     const exportRows = filteredUnlinked.map((r) => ({
@@ -531,6 +561,7 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
       payerCode: r.payerCode || '—',
       resolvedSector: r.resolvedSector || 'غير مرتبط بقطاع',
       salesValue: r.salesValue,
+      netSalesValue: r.netSalesValue ?? 0,
       taxValue: r.taxValue,
     }));
     const totalRow =
@@ -543,6 +574,7 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
             payerCode: '',
             resolvedSector: '',
             salesValue: unlinkedTotals.sales,
+            netSalesValue: unlinkedTotals.netSales,
             taxValue: unlinkedTotals.tax,
           }
         : null;
@@ -576,9 +608,54 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
 
   return (
     <div className="space-y-5">
-      {/* Top KPI Cards (Filtered & Computed on target > 0) */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {/* Card 1: Active Branches */}
+      {/* Top KPI Cards (Filtered & Computed Dynamically) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        {/* Card 1: Total Sales & Net Sales (Branches / Unlinked) */}
+        <div
+          className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between"
+          title={`${formatEGP(tab === 'linked' ? tableTotals.sales : unlinkedTotals.sales)} | صافي: ${formatEGP(tab === 'linked' ? tableTotals.netSales : unlinkedTotals.netSales)}`}
+        >
+          <div className="text-xs font-semibold text-slate-500 mb-2">
+            {tab === 'unlinked'
+              ? 'مبيعات السجلات غير المرتبطة بفروع'
+              : effectiveSector !== 'ALL'
+                ? `مبيعات فروع ${effectiveSector}`
+                : 'مبيعات الفروع'}
+          </div>
+          <div className="space-y-1.5">
+            <div>
+              <div className="text-[11px] text-slate-500">إجمالي قيمة المبيعات</div>
+              <span className="text-xl font-bold font-num tabular-nums text-slate-900" dir="ltr">
+                {formatEGP(tab === 'linked' ? tableTotals.sales : unlinkedTotals.sales)}
+              </span>
+            </div>
+            <div className="pt-1 border-t border-slate-100">
+              <div className="text-[11px] text-teal-700">صافي قيمة المبيعات</div>
+              <span className="text-base font-bold font-num tabular-nums text-teal-800" dir="ltr">
+                {formatEGP(tab === 'linked' ? tableTotals.netSales : unlinkedTotals.netSales)}
+              </span>
+            </div>
+          </div>
+          <div className="text-xs text-slate-500 mt-2">
+            {tab === 'linked' ? (
+              <>
+                من <span className="font-num font-semibold text-slate-700">{formatNum(filteredBranches.length)}</span> فرع · التحقيق:{' '}
+                <span className="font-num font-semibold text-teal-700" dir="ltr">
+                  {tableTotals.achievementPct !== null ? formatPctOneDecimal(tableTotals.achievementPct) : '—'}
+                </span>
+              </>
+            ) : (
+              <>
+                عبر <span className="font-num font-semibold text-slate-700">{formatNum(filteredUnlinked.length)}</span> سجل · الضريبة:{' '}
+                <span className="font-num font-semibold text-slate-700" dir="ltr">
+                  {formatEGP(unlinkedTotals.tax)}
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Card 2: Active Branches */}
         <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between">
           <div className="text-xs font-semibold text-slate-500 mb-2">
             عدد الفروع النشطة ونسبتها إلى إجمالي عدد الفروع
@@ -596,7 +673,7 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
           </div>
         </div>
 
-        {/* Card 2: Inactive Branches */}
+        {/* Card 3: Inactive Branches */}
         <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between">
           <div className="text-xs font-semibold text-slate-500 mb-2">
             عدد الفروع الغير نشطة ونسبتها إلى إجمالي عدد الفروع
@@ -614,7 +691,7 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
           </div>
         </div>
 
-        {/* Card 3: Branch Efficiency */}
+        {/* Card 4: Branch Efficiency */}
         <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between">
           <div className="text-xs font-semibold text-slate-500 mb-2">كفاءة الفروع</div>
           <div className="flex items-baseline justify-between gap-3">
@@ -791,7 +868,16 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
                       onClick={() => toggleSort('sales')}
                       className="inline-flex items-center gap-1 cursor-pointer hover:text-teal-800 underline decoration-slate-400 underline-offset-4"
                     >
-                      <span>المبيعات</span>
+                      <span>إجمالي قيمة المبيعات</span>
+                      <ArrowUpDown className="w-3 h-3 text-slate-400" />
+                    </button>
+                  </th>
+                  <th className="py-2.5 px-4 whitespace-nowrap text-center">
+                    <button
+                      onClick={() => toggleSort('netSales')}
+                      className="inline-flex items-center gap-1 cursor-pointer hover:text-teal-800 underline decoration-slate-400 underline-offset-4"
+                    >
+                      <span>صافي قيمة المبيعات</span>
                       <ArrowUpDown className="w-3 h-3 text-slate-400" />
                     </button>
                   </th>
@@ -827,7 +913,7 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
               <tbody className="divide-y divide-slate-100">
                 {filteredBranches.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-10 text-center text-xs text-slate-500">
+                    <td colSpan={7} className="py-10 text-center text-xs text-slate-500">
                       لا توجد فروع مطابقة للفلاتر المحددة
                     </td>
                   </tr>
@@ -857,6 +943,15 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
                           title={formatEGP(b.sales)}
                         >
                           {formatNum(b.sales, 0)}
+                        </td>
+                        <td
+                          className={`py-2 px-4 text-center font-num tabular-nums whitespace-nowrap font-medium ${
+                            (b.netSales ?? 0) < 0 ? 'text-rose-700 font-semibold' : 'text-teal-800'
+                          }`}
+                          dir="ltr"
+                          title={formatEGP(b.netSales ?? 0)}
+                        >
+                          {formatNum(b.netSales ?? 0, 0)}
                         </td>
                         <td
                           className={`py-2 px-4 text-center font-num tabular-nums whitespace-nowrap ${
@@ -901,6 +996,9 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
                     <td className="py-2.5 px-4 text-center font-num tabular-nums whitespace-nowrap" dir="ltr" title={formatEGP(tableTotals.sales)}>
                       {formatNum(tableTotals.sales, 0)}
                     </td>
+                    <td className="py-2.5 px-4 text-center font-num tabular-nums whitespace-nowrap text-teal-800" dir="ltr" title={formatEGP(tableTotals.netSales)}>
+                      {formatNum(tableTotals.netSales, 0)}
+                    </td>
                     <td className="py-2.5 px-4 text-center font-num tabular-nums whitespace-nowrap" dir="ltr" title={formatEGP(tableTotals.tax)}>
                       {formatNum(tableTotals.tax, 0)}
                     </td>
@@ -933,14 +1031,15 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
                     <th className="py-3 px-4">اسم العميل (Sold-to)</th>
                     <th className="py-3 px-4">Payer</th>
                     <th className="py-3 px-4">القطاع المرتبط</th>
-                    <th className="py-3 px-4">المبيعات</th>
+                    <th className="py-3 px-4">إجمالي قيمة المبيعات</th>
+                    <th className="py-3 px-4">صافي قيمة المبيعات</th>
                     <th className="py-3 px-4">الضريبة</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {filteredUnlinked.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="py-8 text-center text-xs text-slate-500">
+                      <td colSpan={9} className="py-8 text-center text-xs text-slate-500">
                         جميع السجلات مرتبطة بفروع بنجاح
                       </td>
                     </tr>
@@ -954,6 +1053,7 @@ export const BranchesView: React.FC<BranchesViewProps> = ({
                         <td className="py-2.5 px-4 font-num text-xs text-slate-600">{r.payerCode || '—'}</td>
                         <td className="py-2.5 px-4 text-xs text-slate-700">{r.resolvedSector || 'غير مرتبط بقطاع'}</td>
                         <td className="py-2.5 px-4 font-num font-semibold text-slate-900">{formatEGP(r.salesValue)}</td>
+                        <td className="py-2.5 px-4 font-num font-semibold text-teal-800">{formatEGP(r.netSalesValue ?? 0)}</td>
                         <td className="py-2.5 px-4 font-num text-slate-600">{formatEGP(r.taxValue)}</td>
                       </tr>
                     ))

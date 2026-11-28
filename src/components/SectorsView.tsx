@@ -28,6 +28,7 @@ interface SupervisorGroup {
   commercialTotal: number;
   industrialTotal: number;
   salesTotal: number;
+  netSalesTotal: number;
   taxTotal: number;
 }
 
@@ -71,13 +72,56 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
   const availableSupervisors = useMemo(() => {
     const map = new Map<string, string>();
     for (const c of chains) {
+      if (sectorFilter !== 'ALL' && c.sectorName !== sectorFilter) continue;
       if (c.supervisorName) {
         const norm = normalizeArabicText(c.supervisorName);
         if (norm && !map.has(norm)) map.set(norm, c.supervisorName.trim());
       }
     }
     return Array.from(map.values());
-  }, [chains]);
+  }, [chains, sectorFilter]);
+
+  const visibleSectors = useMemo(() => {
+    if (sectorFilter === 'ALL') return sectors;
+    return sectors.filter((s) => s.sectorName === sectorFilter);
+  }, [sectors, sectorFilter]);
+
+  const visibleAggregations = useMemo(() => {
+    if (sectorFilter === 'ALL') return aggregations;
+    return aggregations
+      .map((agg) => {
+        const matched = visibleSectors.filter((s) => agg.includedSectors.includes(s.sectorName));
+        if (matched.length === 0) return null;
+        let sales = 0;
+        let netSales = 0;
+        let tax = 0;
+        let target = 0;
+        for (const s of matched) {
+          sales += s.sales;
+          netSales += s.netSales ?? 0;
+          tax += s.tax;
+          target += s.target;
+        }
+        sales = Number(sales.toFixed(2));
+        netSales = Number(netSales.toFixed(2));
+        tax = Number(tax.toFixed(2));
+        target = Number(target.toFixed(2));
+        const variance = Number((sales - target).toFixed(2));
+        const denom = target - tax;
+        const achievementPct = denom > 0 ? Number(((sales / denom) * 100).toFixed(2)) : null;
+        return {
+          ...agg,
+          sales,
+          netSales,
+          tax,
+          target,
+          variance,
+          achievementPct,
+          isPartialForUser: matched.length < agg.includedSectors.length,
+        };
+      })
+      .filter((a): a is AggregationMetricRow => a !== null);
+  }, [aggregations, visibleSectors, sectorFilter]);
 
   const filteredChains = useMemo(() => {
     const q = normalizeArabicText(search);
@@ -110,6 +154,7 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
             commercialTotal: 0,
             industrialTotal: 0,
             salesTotal: 0,
+            netSalesTotal: 0,
             taxTotal: 0,
           },
           chainByNormName: new Map(),
@@ -127,6 +172,7 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
         existingChain.commercialSales = Number((existingChain.commercialSales + c.commercialSales).toFixed(2));
         existingChain.industrialSales = Number((existingChain.industrialSales + c.industrialSales).toFixed(2));
         existingChain.sales = Number((existingChain.sales + c.sales).toFixed(2));
+        existingChain.netSales = Number(((existingChain.netSales ?? 0) + (c.netSales ?? 0)).toFixed(2));
         existingChain.tax = Number((existingChain.tax + c.tax).toFixed(2));
         existingChain.recordCount += c.recordCount;
         if (c.chainCode && !existingChain.chainCode.includes(c.chainCode)) {
@@ -137,6 +183,7 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
       bucket.group.commercialTotal += c.commercialSales;
       bucket.group.industrialTotal += c.industrialSales;
       bucket.group.salesTotal += c.sales;
+      bucket.group.netSalesTotal += c.netSales ?? 0;
       bucket.group.taxTotal += c.tax;
     }
 
@@ -145,6 +192,7 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
       g.commercialTotal = Number(g.commercialTotal.toFixed(2));
       g.industrialTotal = Number(g.industrialTotal.toFixed(2));
       g.salesTotal = Number(g.salesTotal.toFixed(2));
+      g.netSalesTotal = Number(g.netSalesTotal.toFixed(2));
       g.taxTotal = Number(g.taxTotal.toFixed(2));
       for (const ch of g.chains) {
         ch.shareOfSupervisorPct = g.salesTotal !== 0 ? Number(((ch.sales / g.salesTotal) * 100).toFixed(1)) : 0;
@@ -176,17 +224,20 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
     let commercial = 0;
     let industrial = 0;
     let sales = 0;
+    let netSales = 0;
     let tax = 0;
     for (const g of supervisorGroups) {
       commercial += g.commercialTotal;
       industrial += g.industrialTotal;
       sales += g.salesTotal;
+      netSales += g.netSalesTotal;
       tax += g.taxTotal;
     }
     return {
       commercial: Number(commercial.toFixed(2)),
       industrial: Number(industrial.toFixed(2)),
       sales: Number(sales.toFixed(2)),
+      netSales: Number(netSales.toFixed(2)),
       tax: Number(tax.toFixed(2)),
     };
   }, [supervisorGroups]);
@@ -220,6 +271,7 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
           commercialSales: c.commercialSales,
           industrialSales: c.industrialSales,
           sales: c.sales,
+          netSales: c.netSales ?? 0,
           tax: c.tax,
           sharePct: c.shareOfSupervisorPct,
         });
@@ -232,6 +284,7 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
         commercialSales: group.commercialTotal,
         industrialSales: group.industrialTotal,
         sales: group.salesTotal,
+        netSales: group.netSalesTotal,
         tax: group.taxTotal,
         sharePct: group.salesTotal !== 0 ? 100 : 0,
         _tone: 'subtotal',
@@ -245,7 +298,8 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
     { header: 'اسم السلسلة', key: 'chainName', type: 'string' as const, align: 'right' as const, minWidth: 24 },
     { header: 'مبيعات التجارى', key: 'commercialSales', type: 'currency' as const, minWidth: 16 },
     { header: 'مبيعات الصناعى', key: 'industrialSales', type: 'currency' as const, minWidth: 16 },
-    { header: 'الإجمالى', key: 'sales', type: 'currency' as const, minWidth: 16 },
+    { header: 'إجمالي قيمة المبيعات', key: 'sales', type: 'currency' as const, minWidth: 16 },
+    { header: 'صافي قيمة المبيعات', key: 'netSales', type: 'currency' as const, minWidth: 16 },
     { header: 'الضريبة', key: 'tax', type: 'currency' as const, minWidth: 15 },
     { header: 'نسبة المشاركة', key: 'sharePct', type: 'percent' as const, minWidth: 14 },
   ];
@@ -267,7 +321,8 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
             { header: 'القطاع', key: 'sectorName', type: 'string', minWidth: 18 },
             { header: 'مبيعات التجارى', key: 'commercialSales', type: 'currency', minWidth: 16 },
             { header: 'مبيعات الصناعى', key: 'industrialSales', type: 'currency', minWidth: 16 },
-            { header: 'الإجمالى', key: 'sales', type: 'currency', minWidth: 16 },
+            { header: 'إجمالي قيمة المبيعات', key: 'sales', type: 'currency', minWidth: 16 },
+            { header: 'صافي قيمة المبيعات', key: 'netSales', type: 'currency', minWidth: 16 },
             { header: 'الضريبة', key: 'tax', type: 'currency', minWidth: 15 },
             { header: 'نسبة المشاركة', key: 'sharePct', type: 'percent', minWidth: 14 },
           ],
@@ -281,6 +336,7 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
                 commercialSales: grandTotals.commercial,
                 industrialSales: grandTotals.industrial,
                 sales: grandTotals.sales,
+                netSales: grandTotals.netSales,
                 tax: grandTotals.tax,
                 sharePct: grandTotals.sales !== 0 ? 100 : 0,
               }
@@ -292,15 +348,17 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
           subtitle: filterMeta.summary.join(' | '),
           columns: [
             { header: 'القطاع', key: 'sectorName', type: 'string', minWidth: 20 },
-            { header: 'المبيعات', key: 'sales', type: 'currency', minWidth: 18 },
+            { header: 'إجمالي قيمة المبيعات', key: 'sales', type: 'currency', minWidth: 18 },
+            { header: 'صافي قيمة المبيعات', key: 'netSales', type: 'currency', minWidth: 18 },
             { header: 'الضريبة', key: 'tax', type: 'currency', minWidth: 16 },
             { header: 'الهدف', key: 'target', type: 'currency', minWidth: 18 },
             { header: 'الفرق', key: 'variance', type: 'currency', minWidth: 18 },
             { header: 'نسبة التحقيق', key: 'achievementPct', type: 'percent', minWidth: 14 },
           ],
-          rows: sectors.map((s) => ({
+          rows: visibleSectors.map((s) => ({
             sectorName: s.sectorName,
             sales: s.sales,
+            netSales: s.netSales ?? 0,
             tax: s.tax,
             target: s.target,
             variance: s.variance,
@@ -331,6 +389,7 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
                 commercialSales: grandTotals.commercial,
                 industrialSales: grandTotals.industrial,
                 sales: grandTotals.sales,
+                netSales: grandTotals.netSales,
                 tax: grandTotals.tax,
                 sharePct: grandTotals.sales !== 0 ? 100 : 0,
               }
@@ -348,13 +407,22 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
     <div className="space-y-6">
       {/* Sector Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-        {sectors.map((s) => (
+        {visibleSectors.map((s) => (
           <div key={s.sectorName} className="bg-white border border-slate-200 rounded-xl p-5">
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-sm font-bold text-slate-900">{s.sectorName}</h3>
               <span className="font-num text-xs font-semibold text-teal-700">{formatPct(s.achievementPct)}</span>
             </div>
-            <div className="text-xl font-bold font-num text-slate-900 mb-3">{formatEGP(s.sales)}</div>
+            <div className="space-y-1.5 mb-3">
+              <div>
+                <div className="text-[11px] text-slate-500">إجمالي قيمة المبيعات</div>
+                <div className="text-lg font-bold font-num text-slate-900">{formatEGP(s.sales)}</div>
+              </div>
+              <div className="pt-1 border-t border-slate-100">
+                <div className="text-[11px] text-teal-700">صافي قيمة المبيعات</div>
+                <div className="text-base font-bold font-num text-teal-800">{formatEGP(s.netSales ?? 0)}</div>
+              </div>
+            </div>
             <div className="space-y-1 text-xs text-slate-600 border-t border-slate-100 pt-3">
               <div className="flex justify-between">
                 <span>الهدف:</span>
@@ -377,12 +445,23 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
 
       {/* Aggregations strip */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {aggregations.map((agg) => (
+        {visibleAggregations.map((agg) => (
           <div key={agg.key} className="bg-slate-100/70 border border-slate-200 rounded-xl p-4">
             <div className="text-xs font-bold text-slate-800">{agg.title}</div>
-            <div className="text-[11px] text-slate-500 mb-2">{agg.subtitle}</div>
-            <div className="text-lg font-bold font-num text-slate-900">{formatEGP(agg.sales)}</div>
-            <div className="text-xs text-slate-600 mt-1">
+            <div className="text-[11px] text-slate-500 mb-2">
+              {sectorFilter !== 'ALL' ? `مفلتر على قطاع: ${sectorFilter}` : agg.subtitle}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+              <div>
+                <div className="text-[11px] text-slate-500">إجمالي قيمة المبيعات</div>
+                <div className="text-base font-bold font-num text-slate-900">{formatEGP(agg.sales)}</div>
+              </div>
+              <div>
+                <div className="text-[11px] text-teal-700">صافي قيمة المبيعات</div>
+                <div className="text-base font-bold font-num text-teal-800">{formatEGP(agg.netSales ?? 0)}</div>
+              </div>
+            </div>
+            <div className="text-xs text-slate-600 mt-2">
               نسبة التحقيق: <span className="font-num font-semibold text-teal-700">{formatPct(agg.achievementPct)}</span>
             </div>
           </div>
@@ -401,7 +480,9 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
               {' · '}
               السلاسل: <span className="font-num font-semibold text-slate-700">{formatNum(unifiedChainCount)}</span>
               {' · '}
-              التصنيف التجاري/الصناعي مرتبط بشيت تعريف الأصناف (التصنيف A)
+              إجمالي قيمة المبيعات المفلترة: <span className="font-num font-semibold text-slate-900">{formatEGP(grandTotals.sales)}</span>
+              {' · '}
+              صافي قيمة المبيعات المفلترة: <span className="font-num font-semibold text-teal-800">{formatEGP(grandTotals.netSales)}</span>
             </p>
             {hasLegacyMissingSupervisors && (
               <p className="text-[11px] text-sky-800 mt-1">
@@ -413,7 +494,10 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
           <div className="flex flex-wrap items-center gap-2.5">
             <select
               value={sectorFilter}
-              onChange={(e) => setSectorFilter(e.target.value)}
+              onChange={(e) => {
+                setSectorFilter(e.target.value);
+                setSupervisorFilter('ALL');
+              }}
               className="px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-teal-600"
             >
               <option value="ALL">جميع القطاعات المصرح بها</option>
@@ -465,7 +549,8 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
                 <th className="py-2.5 px-3 whitespace-nowrap">اسم السلسلة</th>
                 <th className="py-2.5 px-3 whitespace-nowrap">مبيعات التجارى</th>
                 <th className="py-2.5 px-3 whitespace-nowrap">مبيعات الصناعى</th>
-                <th className="py-2.5 px-3 whitespace-nowrap">الإجمالى</th>
+                <th className="py-2.5 px-3 whitespace-nowrap">إجمالي قيمة المبيعات</th>
+                <th className="py-2.5 px-3 whitespace-nowrap">صافي قيمة المبيعات</th>
                 <th className="py-2.5 px-3 whitespace-nowrap">الضريبة</th>
                 <th className="py-2.5 px-3 whitespace-nowrap">نسبة المشاركة</th>
               </tr>
@@ -473,7 +558,7 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
             <tbody>
               {supervisorGroups.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-10 text-center text-xs text-slate-500">
+                  <td colSpan={8} className="py-10 text-center text-xs text-slate-500">
                     لا توجد بيانات سلاسل مطابقة للبحث
                   </td>
                 </tr>
@@ -520,6 +605,15 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
                             title={formatEGP(c.sales)}
                           >
                             {formatNum(c.sales, 0)}
+                          </td>
+                          <td
+                            className={`py-1.5 px-3 font-num tabular-nums whitespace-nowrap font-semibold ${
+                              (c.netSales ?? 0) < 0 ? 'text-rose-700' : 'text-teal-800'
+                            }`}
+                            dir="ltr"
+                            title={formatEGP(c.netSales ?? 0)}
+                          >
+                            {formatNum(c.netSales ?? 0, 0)}
                           </td>
                           <td
                             className={`py-1.5 px-3 font-num tabular-nums whitespace-nowrap ${
@@ -577,6 +671,15 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
                       </td>
                       <td
                         className={`py-2 px-3 font-num tabular-nums whitespace-nowrap ${
+                          group.netSalesTotal < 0 ? 'text-rose-700' : 'text-teal-800'
+                        }`}
+                        dir="ltr"
+                        title={formatEGP(group.netSalesTotal)}
+                      >
+                        {formatNum(group.netSalesTotal, 0)}
+                      </td>
+                      <td
+                        className={`py-2 px-3 font-num tabular-nums whitespace-nowrap ${
                           group.taxTotal < 0 ? 'text-rose-700' : 'text-slate-800'
                         }`}
                         dir="ltr"
@@ -608,6 +711,9 @@ export const SectorsView: React.FC<SectorsViewProps> = ({
                   </td>
                   <td className="py-2.5 px-3 font-num tabular-nums whitespace-nowrap" dir="ltr" title={formatEGP(grandTotals.sales)}>
                     {formatNum(grandTotals.sales, 0)}
+                  </td>
+                  <td className="py-2.5 px-3 font-num tabular-nums whitespace-nowrap text-teal-800" dir="ltr" title={formatEGP(grandTotals.netSales)}>
+                    {formatNum(grandTotals.netSales, 0)}
                   </td>
                   <td className="py-2.5 px-3 font-num tabular-nums whitespace-nowrap" dir="ltr" title={formatEGP(grandTotals.tax)}>
                     {formatNum(grandTotals.tax, 0)}

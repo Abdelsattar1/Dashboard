@@ -75,7 +75,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
             { header: 'التاريخ', key: 'date', type: 'string', minWidth: 14 },
             { header: 'المبيعات الموجبة', key: 'grossSales', type: 'currency', minWidth: 18 },
             { header: 'المرتجعات', key: 'returnsValue', type: 'currency', minWidth: 16 },
-            { header: 'صافي المبيعات', key: 'sales', type: 'currency', minWidth: 18 },
+            { header: 'إجمالي قيمة المبيعات', key: 'sales', type: 'currency', minWidth: 18 },
             { header: 'الضريبة', key: 'tax', type: 'currency', minWidth: 15 },
             { header: 'الإجمالي التراكمي', key: 'cumulativeSales', type: 'currency', minWidth: 18 },
             { header: 'عدد السجلات', key: 'recordCount', type: 'integer', minWidth: 14 },
@@ -119,7 +119,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
             { header: 'التاريخ', key: 'date', type: 'string', align: 'center' },
             { header: 'المبيعات الموجبة', key: 'grossSales', type: 'currency' },
             { header: 'المرتجعات', key: 'returnsValue', type: 'currency' },
-            { header: 'صافي المبيعات', key: 'sales', type: 'currency' },
+            { header: 'إجمالي قيمة المبيعات', key: 'sales', type: 'currency' },
             { header: 'الضريبة', key: 'tax', type: 'currency' },
             { header: 'الإجمالي التراكمي', key: 'cumulativeSales', type: 'currency' },
             { header: 'عدد السجلات', key: 'recordCount', type: 'integer' },
@@ -159,7 +159,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         {/* Cumulative Growth */}
         <div className="bg-white border border-slate-200 rounded-xl p-5">
           <h3 className="text-sm font-bold text-slate-900 mb-1">المبيعات التراكمية عبر الفترة</h3>
-          <p className="text-xs text-slate-500 mb-4">تصاعد إجمالي New Growth Value BD&T يومًا بيوم</p>
+          <p className="text-xs text-slate-500 mb-4">تصاعد إجمالي قيمة المبيعات (New Growth Value BD&amp;T) يومًا بيوم</p>
           <div className="h-72 w-full" dir="ltr">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={series} margin={{ top: 10, right: 20, left: 10, bottom: 20 }}>
@@ -215,7 +215,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                 <th className="py-3 px-4">التاريخ</th>
                 <th className="py-3 px-4">المبيعات الموجبة</th>
                 <th className="py-3 px-4">المرتجعات</th>
-                <th className="py-3 px-4">صافي المبيعات</th>
+                <th className="py-3 px-4">إجمالي قيمة المبيعات</th>
                 <th className="py-3 px-4">الضريبة</th>
                 <th className="py-3 px-4">الإجمالي التراكمي</th>
                 <th className="py-3 px-4">عدد السجلات</th>

@@ -11,6 +11,7 @@ import type {
   ItemCategoryAnalysisRow,
   ItemMetricRow,
   RepMetricRow,
+  RepTargetMode,
   SalesSource,
   SalesTransactionRow,
   SectorMetricRow,
@@ -50,9 +51,11 @@ interface BatchDbRow {
   created_at: string;
   vf05n_count: number;
   vf05n_sales_total: number;
+  vf05n_net_sales_total: number;
   vf05n_tax_total: number;
   zsales_count: number;
   zsales_sales_total: number;
+  zsales_net_sales_total: number;
   zsales_tax_total: number;
   unlinked_branch_count: number;
   unlinked_sector_count: number;
@@ -73,9 +76,11 @@ function getActiveBatch(db: Database.Database): ActiveBatchInfo | null {
     createdAt: row.created_at,
     vf05nCount: row.vf05n_count,
     vf05nSalesTotal: row.vf05n_sales_total,
+    vf05nNetSalesTotal: row.vf05n_net_sales_total ?? 0,
     vf05nTaxTotal: row.vf05n_tax_total,
     zsalesCount: row.zsales_count,
     zsalesSalesTotal: row.zsales_sales_total,
+    zsalesNetSalesTotal: row.zsales_net_sales_total ?? 0,
     zsalesTaxTotal: row.zsales_tax_total,
     unlinkedBranchCount: row.unlinked_branch_count,
     unlinkedSectorCount: row.unlinked_sector_count,
@@ -169,22 +174,28 @@ export function getDashboardSummary(
       dateRange: { minDate: null, maxDate: null },
       kpis: {
         privateMarketsSales: 0,
+        privateMarketsNetSales: 0,
         privateMarketsTarget: 0,
         privateMarketsTax: 0,
         privateMarketsVariance: 0,
         privateMarketsAchievementPct: null,
         directAndArmySales: 0,
+        directAndArmyNetSales: 0,
         directAndArmyTarget: 0,
         directAndArmyAchievementPct: null,
         chainsSectorSales: 0,
+        chainsSectorNetSales: 0,
         chainsSectorTarget: 0,
         chainsSectorAchievementPct: null,
         unlinkedSectorSales: 0,
+        unlinkedSectorNetSales: 0,
         unlinkedSectorCount: 0,
         unlinkedBranchSales: 0,
+        unlinkedBranchNetSales: 0,
         unlinkedBranchCount: 0,
         totalSourceRecords: 0,
         totalSourceSales: 0,
+        totalSourceNetSales: 0,
         totalSourceTax: 0,
       },
       sectors: [],
@@ -223,6 +234,7 @@ export function getDashboardSummary(
       `SELECT
         resolved_sector AS sector_name,
         COALESCE(SUM(sales_value), 0) AS sales,
+        COALESCE(SUM(net_sales_value), 0) AS net_sales,
         COALESCE(SUM(tax_value), 0) AS tax,
         COUNT(*) AS record_count,
         SUM(CASE WHEN is_return = 1 THEN 1 ELSE 0 END) AS return_count,
@@ -234,6 +246,7 @@ export function getDashboardSummary(
     .all(...scope.args) as Array<{
     sector_name: string | null;
     sales: number;
+    net_sales: number;
     tax: number;
     record_count: number;
     return_count: number;
@@ -242,20 +255,23 @@ export function getDashboardSummary(
 
   const salesBySector = new Map<
     string,
-    { sales: number; tax: number; count: number; returnCount: number; returnValue: number }
+    { sales: number; netSales: number; tax: number; count: number; returnCount: number; returnValue: number }
   >();
   let unlinkedSectorSales = 0;
+  let unlinkedSectorNetSales = 0;
   let unlinkedSectorCount = 0;
   let unlinkedSectorTax = 0;
 
   for (const row of groupedSales) {
     if (!row.sector_name) {
       unlinkedSectorSales += row.sales;
+      unlinkedSectorNetSales += row.net_sales;
       unlinkedSectorTax += row.tax;
       unlinkedSectorCount += row.record_count;
     } else {
       salesBySector.set(row.sector_name, {
         sales: row.sales,
+        netSales: row.net_sales,
         tax: row.tax,
         count: row.record_count,
         returnCount: row.return_count,
@@ -286,12 +302,13 @@ export function getDashboardSummary(
 
   const sectorRows: SectorMetricRow[] = [];
   for (const sName of [...visibleOriginalSectors, ...Array.from(extraSectorNames)]) {
-    const agg = salesBySector.get(sName) ?? { sales: 0, tax: 0, count: 0, returnCount: 0, returnValue: 0 };
+    const agg = salesBySector.get(sName) ?? { sales: 0, netSales: 0, tax: 0, count: 0, returnCount: 0, returnValue: 0 };
     const targetInfo = targetBySector.get(sName) ?? {
       target: 0,
       isOriginal: ORIGINAL_SECTORS.includes(sName as (typeof ORIGINAL_SECTORS)[number]),
     };
     const sales = Number(agg.sales.toFixed(2));
+    const netSales = Number(agg.netSales.toFixed(2));
     const tax = Number(agg.tax.toFixed(2));
     const target = Number(targetInfo.target.toFixed(2));
     const variance = Number((sales - target).toFixed(2));
@@ -299,6 +316,7 @@ export function getDashboardSummary(
     sectorRows.push({
       sectorName: sName,
       sales,
+      netSales,
       tax,
       target,
       variance,
@@ -313,6 +331,7 @@ export function getDashboardSummary(
   // Helper to compute executive aggregations ONLY from authorized original sectors (no double counting)
   const sumSectors = (names: readonly string[]) => {
     let sales = 0;
+    let netSales = 0;
     let tax = 0;
     let target = 0;
     let countIncluded = 0;
@@ -322,16 +341,19 @@ export function getDashboardSummary(
       const row = sectorRows.find((r) => r.sectorName === name);
       if (row) {
         sales += row.sales;
+        netSales += row.netSales;
         tax += row.tax;
         target += row.target;
         countIncluded++;
       }
     }
     sales = Number(sales.toFixed(2));
+    netSales = Number(netSales.toFixed(2));
     tax = Number(tax.toFixed(2));
     target = Number(target.toFixed(2));
     return {
       sales,
+      netSales,
       tax,
       target,
       variance: Number((sales - target).toFixed(2)),
@@ -351,6 +373,7 @@ export function getDashboardSummary(
       subtitle: 'مجموع القطاعات الأربعة الأصلية',
       includedSectors: ['التوريد المباشر', 'التوريد المركزي', 'التوب ريتيل', 'الجيش'],
       sales: privateMarkets.sales,
+      netSales: privateMarkets.netSales,
       tax: privateMarkets.tax,
       target: privateMarkets.target,
       variance: privateMarkets.variance,
@@ -363,6 +386,7 @@ export function getDashboardSummary(
       subtitle: 'التوريد المباشر + التوب ريتيل + الجيش',
       includedSectors: ['التوريد المباشر', 'التوب ريتيل', 'الجيش'],
       sales: directAndArmy.sales,
+      netSales: directAndArmy.netSales,
       tax: directAndArmy.tax,
       target: directAndArmy.target,
       variance: directAndArmy.variance,
@@ -375,6 +399,7 @@ export function getDashboardSummary(
       subtitle: 'التوريد المباشر + التوريد المركزي',
       includedSectors: ['التوريد المباشر', 'التوريد المركزي'],
       sales: chainsSector.sales,
+      netSales: chainsSector.netSales,
       tax: chainsSector.tax,
       target: chainsSector.target,
       variance: chainsSector.variance,
@@ -386,19 +411,19 @@ export function getDashboardSummary(
   // Unlinked branches within scope
   const unlinkedBranchRow = db
     .prepare(
-      `SELECT COUNT(*) AS cnt, COALESCE(SUM(sales_value), 0) AS sales
+      `SELECT COUNT(*) AS cnt, COALESCE(SUM(sales_value), 0) AS sales, COALESCE(SUM(net_sales_value), 0) AS net_sales
        FROM sales_records sr
        WHERE ${scope.sql} AND sr.resolved_branch_code IS NULL`
     )
-    .get(...scope.args) as { cnt: number; sales: number };
+    .get(...scope.args) as { cnt: number; sales: number; net_sales: number };
 
   const totalScopeRow = db
     .prepare(
-      `SELECT COUNT(*) AS cnt, COALESCE(SUM(sales_value), 0) AS sales, COALESCE(SUM(tax_value), 0) AS tax
+      `SELECT COUNT(*) AS cnt, COALESCE(SUM(sales_value), 0) AS sales, COALESCE(SUM(net_sales_value), 0) AS net_sales, COALESCE(SUM(tax_value), 0) AS tax
        FROM sales_records sr
        WHERE ${scope.sql}`
     )
-    .get(...scope.args) as { cnt: number; sales: number; tax: number };
+    .get(...scope.args) as { cnt: number; sales: number; net_sales: number; tax: number };
 
   // Timeline
   const timeline = getTimelineSeries(db, user, params);
@@ -411,16 +436,18 @@ export function getDashboardSummary(
         `SELECT
           COUNT(*) AS cnt,
           COALESCE(SUM(sales_value), 0) AS sales,
+          COALESCE(SUM(net_sales_value), 0) AS net_sales,
           COALESCE(SUM(tax_value), 0) AS tax,
           SUM(CASE WHEN is_return = 1 THEN 1 ELSE 0 END) AS return_cnt
          FROM sales_records sr
          WHERE ${srcScope.sql}`
       )
-      .get(...srcScope.args) as { cnt: number; sales: number; tax: number; return_cnt: number };
+      .get(...srcScope.args) as { cnt: number; sales: number; net_sales: number; tax: number; return_cnt: number };
 
     return {
       count: row.cnt,
       salesTotal: Number(row.sales.toFixed(2)),
+      netSalesTotal: Number(row.net_sales.toFixed(2)),
       taxTotal: Number(row.tax.toFixed(2)),
       returnCount: row.return_cnt || 0,
     };
@@ -429,6 +456,7 @@ export function getDashboardSummary(
   const vfComp = buildSourceSum('VF05N');
   const zsComp = buildSourceSum('ZSALES');
   const salesDiff = Number((vfComp.salesTotal - zsComp.salesTotal).toFixed(2));
+  const netSalesDiff = Number((vfComp.netSalesTotal - zsComp.netSalesTotal).toFixed(2));
   const taxDiff = Number((vfComp.taxTotal - zsComp.taxTotal).toFixed(2));
 
   return {
@@ -441,22 +469,28 @@ export function getDashboardSummary(
     },
     kpis: {
       privateMarketsSales: privateMarkets.sales,
+      privateMarketsNetSales: privateMarkets.netSales,
       privateMarketsTarget: privateMarkets.target,
       privateMarketsTax: privateMarkets.tax,
       privateMarketsVariance: privateMarkets.variance,
       privateMarketsAchievementPct: privateMarkets.achievementPct,
       directAndArmySales: directAndArmy.sales,
+      directAndArmyNetSales: directAndArmy.netSales,
       directAndArmyTarget: directAndArmy.target,
       directAndArmyAchievementPct: directAndArmy.achievementPct,
       chainsSectorSales: chainsSector.sales,
+      chainsSectorNetSales: chainsSector.netSales,
       chainsSectorTarget: chainsSector.target,
       chainsSectorAchievementPct: chainsSector.achievementPct,
       unlinkedSectorSales: Number(unlinkedSectorSales.toFixed(2)),
+      unlinkedSectorNetSales: Number(unlinkedSectorNetSales.toFixed(2)),
       unlinkedSectorCount,
       unlinkedBranchSales: Number(unlinkedBranchRow.sales.toFixed(2)),
+      unlinkedBranchNetSales: Number(unlinkedBranchRow.net_sales.toFixed(2)),
       unlinkedBranchCount: unlinkedBranchRow.cnt,
       totalSourceRecords: totalScopeRow.cnt,
       totalSourceSales: Number(totalScopeRow.sales.toFixed(2)),
+      totalSourceNetSales: Number(totalScopeRow.net_sales.toFixed(2)),
       totalSourceTax: Number(totalScopeRow.tax.toFixed(2)),
     },
     sectors: sectorRows,
@@ -466,6 +500,7 @@ export function getDashboardSummary(
       vf05n: vfComp,
       zsales: zsComp,
       salesDifference: salesDiff,
+      netSalesDifference: netSalesDiff,
       taxDifference: taxDiff,
       isMatched: Math.abs(salesDiff) <= 0.05 && vfComp.count > 0 && zsComp.count > 0,
     },
@@ -555,6 +590,7 @@ export function getDepartmentsChainsBreakdown(
         COALESCE(NULLIF(TRIM(rep.supervisor_name), ''), '') AS rep_supervisor,
         COALESCE(it.category_name, '') AS item_category,
         COALESCE(SUM(sr.sales_value), 0) AS sales,
+        COALESCE(SUM(sr.net_sales_value), 0) AS net_sales,
         COALESCE(SUM(sr.tax_value), 0) AS tax,
         COUNT(*) AS record_count
        FROM sales_records sr
@@ -573,6 +609,7 @@ export function getDepartmentsChainsBreakdown(
     rep_supervisor: string;
     item_category: string;
     sales: number;
+    net_sales: number;
     tax: number;
     record_count: number;
   }>;
@@ -587,6 +624,7 @@ export function getDepartmentsChainsBreakdown(
     commercialSales: number;
     industrialSales: number;
     sales: number;
+    netSales: number;
     tax: number;
     recordCount: number;
   }
@@ -643,6 +681,7 @@ export function getDepartmentsChainsBreakdown(
         commercialSales: 0,
         industrialSales: 0,
         sales: 0,
+        netSales: 0,
         tax: 0,
         recordCount: 0,
         codeSet,
@@ -684,6 +723,7 @@ export function getDepartmentsChainsBreakdown(
         commercialSales: 0,
         industrialSales: 0,
         sales: 0,
+        netSales: 0,
         tax: 0,
         recordCount: 0,
         codeSet,
@@ -704,6 +744,7 @@ export function getDepartmentsChainsBreakdown(
     else if (cls === 'industrial') existing.industrialSales += r.sales;
 
     existing.sales += r.sales;
+    existing.netSales += r.net_sales;
     existing.tax += r.tax;
     existing.recordCount += r.record_count;
   }
@@ -794,6 +835,7 @@ export function getDepartmentsChainsBreakdown(
       commercialSales: Number(c.commercialSales.toFixed(2)),
       industrialSales: Number(c.industrialSales.toFixed(2)),
       sales: Number(c.sales.toFixed(2)),
+      netSales: Number(c.netSales.toFixed(2)),
       tax: Number(c.tax.toFixed(2)),
       recordCount: c.recordCount,
       shareOfSectorPct: secTotal !== 0 ? Number(((c.sales / secTotal) * 100).toFixed(2)) : 0,
@@ -826,6 +868,7 @@ export function getBranchesAnalytics(
   branches: BranchMetricRow[];
   unlinkedRecords: UnlinkedRecordRow[];
   totalUnlinkedSales: number;
+  totalUnlinkedNetSales: number;
   totalUnlinkedCount: number;
   diagnostics: BranchRepDiagnostics;
 } {
@@ -835,6 +878,7 @@ export function getBranchesAnalytics(
       branches: [],
       unlinkedRecords: [],
       totalUnlinkedSales: 0,
+      totalUnlinkedNetSales: 0,
       totalUnlinkedCount: 0,
       diagnostics: {
         totalTargetedAssignedBranches: 0,
@@ -964,6 +1008,7 @@ export function getBranchesAnalytics(
         COALESCE(MAX(NULLIF(sr.payer_code, '')), '') AS payer_code,
         COALESCE(MAX(NULLIF(sr.resolved_chain_name, '')), '') AS resolved_chain_name,
         COALESCE(SUM(sr.sales_value), 0) AS sales,
+        COALESCE(SUM(sr.net_sales_value), 0) AS net_sales,
         COALESCE(SUM(sr.tax_value), 0) AS tax,
         COUNT(*) AS record_count,
         SUM(CASE WHEN sr.is_return = 1 THEN 1 ELSE 0 END) AS return_count
@@ -978,6 +1023,7 @@ export function getBranchesAnalytics(
     payer_code: string;
     resolved_chain_name: string;
     sales: number;
+    net_sales: number;
     tax: number;
     record_count: number;
     return_count: number;
@@ -985,6 +1031,7 @@ export function getBranchesAnalytics(
 
   interface BranchAggBucket {
     sales: number;
+    netSales: number;
     tax: number;
     recordCount: number;
     returnCount: number;
@@ -1002,6 +1049,7 @@ export function getBranchesAnalytics(
     if (!bucket) {
       bucket = {
         sales: 0,
+        netSales: 0,
         tax: 0,
         recordCount: 0,
         returnCount: 0,
@@ -1015,6 +1063,7 @@ export function getBranchesAnalytics(
       }
     }
     bucket.sales += row.sales;
+    bucket.netSales += row.net_sales;
     bucket.tax += row.tax;
     bucket.recordCount += row.record_count;
     bucket.returnCount += row.return_count;
@@ -1029,10 +1078,12 @@ export function getBranchesAnalytics(
         repCode: cleanRepCode,
         repName: repDisplay,
         sales: 0,
+        netSales: 0,
         tax: 0,
         recordCount: 0,
       };
       existingRep.sales += row.sales;
+      existingRep.netSales += row.net_sales;
       existingRep.tax += row.tax;
       existingRep.recordCount += row.record_count;
       bucket.reps.set(cleanRepCode, existingRep);
@@ -1135,6 +1186,7 @@ export function getBranchesAnalytics(
     repMap: Map<string, BranchRepBreakdown>;
     target: number;
     sales: number;
+    netSales: number;
     tax: number;
     recordCount: number;
     returnCount: number;
@@ -1161,6 +1213,7 @@ export function getBranchesAnalytics(
       branchSalesMap.get(normBranchCode) ?? branchSalesTrimmedMap.get(stripLeadingZeros(normBranchCode));
     const batchFb = batchBranchChainFallback.get(b.branch_code);
     const sales = s?.sales ?? 0;
+    const netSales = s?.netSales ?? 0;
     const tax = s?.tax ?? 0;
     const rawTarget = Number(b.branch_target);
     const target = Number.isFinite(rawTarget) && rawTarget > 0 ? rawTarget : 0;
@@ -1209,6 +1262,7 @@ export function getBranchesAnalytics(
         repMap: new Map(),
         target: 0,
         sales: 0,
+        netSales: 0,
         tax: 0,
         recordCount: 0,
         returnCount: 0,
@@ -1227,6 +1281,7 @@ export function getBranchesAnalytics(
 
     bucket.target += target;
     bucket.sales += sales;
+    bucket.netSales += netSales;
     bucket.tax += tax;
     bucket.recordCount += s?.recordCount ?? 0;
     bucket.returnCount += s?.returnCount ?? 0;
@@ -1238,6 +1293,7 @@ export function getBranchesAnalytics(
           bucket.repMap.set(rb.repCode, { ...rb });
         } else {
           existingRb.sales += rb.sales;
+          existingRb.netSales += rb.netSales;
           existingRb.tax += rb.tax;
           existingRb.recordCount += rb.recordCount;
         }
@@ -1250,6 +1306,7 @@ export function getBranchesAnalytics(
 
   for (const bucket of consolidatedMap.values()) {
     const sales = Number(bucket.sales.toFixed(2));
+    const netSales = Number(bucket.netSales.toFixed(2));
     const tax = Number(bucket.tax.toFixed(2));
     const target = Number(bucket.target.toFixed(2));
     const codes = Array.from(bucket.codeSet);
@@ -1271,6 +1328,7 @@ export function getBranchesAnalytics(
         repCode: rb.repCode,
         repName: rb.repName,
         sales: Number(rb.sales.toFixed(2)),
+        netSales: Number(rb.netSales.toFixed(2)),
         tax: Number(rb.tax.toFixed(2)),
         recordCount: rb.recordCount,
       }))
@@ -1288,6 +1346,7 @@ export function getBranchesAnalytics(
       repBreakdowns,
       target,
       sales,
+      netSales,
       tax,
       variance: Number((sales - target).toFixed(2)),
       achievementPct: target > 0 ? calculateAchievementPct(sales, target, tax) : null,
@@ -1386,7 +1445,7 @@ export function getBranchesAnalytics(
       `SELECT
         sr.id, sr.doc_number, sr.billing_date, sr.payer_code, sr.payer_name,
         sr.sold_to_code, sr.sold_to_name, sr.resolved_sector,
-        sr.sales_value, sr.tax_value, sr.item_code, sr.item_name
+        sr.sales_value, sr.net_sales_value, sr.tax_value, sr.item_code, sr.item_name
        FROM sales_records sr
        WHERE ${scope.sql} AND sr.resolved_branch_code IS NULL
        ORDER BY sr.sales_value DESC`
@@ -1401,14 +1460,17 @@ export function getBranchesAnalytics(
     sold_to_name: string;
     resolved_sector: string | null;
     sales_value: number;
+    net_sales_value: number;
     tax_value: number;
     item_code: string;
     item_name: string;
   }>;
 
   let totalUnlinkedSales = 0;
+  let totalUnlinkedNetSales = 0;
   const unlinkedRecords: UnlinkedRecordRow[] = unlinkedRows.map((r) => {
     totalUnlinkedSales += r.sales_value;
+    totalUnlinkedNetSales += r.net_sales_value ?? 0;
     return {
       id: r.id,
       docNumber: r.doc_number,
@@ -1419,6 +1481,7 @@ export function getBranchesAnalytics(
       soldToName: r.sold_to_name,
       resolvedSector: r.resolved_sector,
       salesValue: Number(r.sales_value.toFixed(2)),
+      netSalesValue: Number((r.net_sales_value ?? 0).toFixed(2)),
       taxValue: Number(r.tax_value.toFixed(2)),
       itemCode: r.item_code,
       itemName: r.item_name,
@@ -1429,19 +1492,140 @@ export function getBranchesAnalytics(
     branches,
     unlinkedRecords,
     totalUnlinkedSales: Number(totalUnlinkedSales.toFixed(2)),
+    totalUnlinkedNetSales: Number(totalUnlinkedNetSales.toFixed(2)),
     totalUnlinkedCount: unlinkedRecords.length,
     diagnostics,
   };
 }
 
+export interface RepManualTargetInput {
+  repCode: string;
+  repName?: string;
+  sectorName?: string;
+  targetValue: number;
+}
+
+export function getSavedRepTargetMode(db: Database.Database): RepTargetMode {
+  try {
+    const row = db
+      .prepare(`SELECT setting_value FROM app_settings WHERE setting_key = 'rep_target_mode' LIMIT 1`)
+      .get() as { setting_value?: string } | undefined;
+    return row?.setting_value === 'manual' ? 'manual' : 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
+export function saveRepTargetMode(
+  db: Database.Database,
+  mode: RepTargetMode,
+  user?: UserProfile
+): RepTargetMode {
+  if (user && user.role !== 'admin' && user.role !== 'sector_manager') {
+    throw new AuthorizationError('صلاحية تغيير وضع أهداف المناديب متاحة للأدمن ومدير القطاع أو الإدارة فقط');
+  }
+  const cleanMode: RepTargetMode = mode === 'manual' ? 'manual' : 'auto';
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO app_settings (setting_key, setting_value, updated_at)
+     VALUES ('rep_target_mode', ?, ?)
+     ON CONFLICT(setting_key) DO UPDATE SET
+       setting_value = excluded.setting_value,
+       updated_at = excluded.updated_at`
+  ).run(cleanMode, now);
+  return cleanMode;
+}
+
+export function saveRepManualTargets(
+  db: Database.Database,
+  targets: RepManualTargetInput[],
+  user?: UserProfile
+): string[] {
+  if (user && user.role !== 'admin' && user.role !== 'sector_manager') {
+    throw new AuthorizationError('صلاحية إدخال وتعديل أهداف المناديب متاحة للأدمن ومدير القطاع أو الإدارة فقط');
+  }
+
+  const activeBatch = getActiveBatch(db);
+  const repSectorMap = new Map<string, string>();
+  if (activeBatch) {
+    const repRows = db
+      .prepare(`SELECT rep_code, COALESCE(sector_name, '') AS sector_name FROM sales_reps WHERE batch_id = ?`)
+      .all(activeBatch.id) as Array<{ rep_code: string; sector_name: string }>;
+    for (const r of repRows) {
+      const code = normalizeCode(r.rep_code);
+      const sec = canonicalizeSectorName(r.sector_name);
+      if (code && sec && !repSectorMap.has(code)) {
+        repSectorMap.set(code, sec);
+      }
+    }
+    const brRows = db
+      .prepare(`SELECT COALESCE(rep_code, '') AS rep_code, sector_name FROM branches WHERE batch_id = ? AND COALESCE(rep_code, '') != ''`)
+      .all(activeBatch.id) as Array<{ rep_code: string; sector_name: string }>;
+    for (const b of brRows) {
+      const code = normalizeCode(b.rep_code);
+      const sec = canonicalizeSectorName(b.sector_name);
+      if (code && sec && !repSectorMap.has(code)) {
+        repSectorMap.set(code, sec);
+      }
+    }
+  }
+
+  const authSet = user && user.role !== 'admin' ? new Set(resolveAuthorizedSectors(user)) : null;
+  const now = new Date().toISOString();
+  const savedCodes: string[] = [];
+
+  const tx = db.transaction(() => {
+    const stmt = db.prepare(
+      `INSERT INTO rep_manual_targets (
+        rep_code, rep_name, sector_name, target_value, updated_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(rep_code) DO UPDATE SET
+        rep_name = COALESCE(NULLIF(excluded.rep_name, ''), rep_manual_targets.rep_name),
+        sector_name = COALESCE(NULLIF(excluded.sector_name, ''), rep_manual_targets.sector_name),
+        target_value = excluded.target_value,
+        updated_at = excluded.updated_at`
+    );
+
+    for (const item of targets) {
+      const rawCode = String(item.repCode || '').trim();
+      if (!rawCode || rawCode === 'UNLINKED' || rawCode === 'غير محدد') continue;
+      const repCode = normalizeCode(rawCode) || rawCode;
+
+      const resolvedSector =
+        canonicalizeSectorName(String(item.sectorName || '').trim()) ||
+        repSectorMap.get(repCode) ||
+        '';
+
+      if (authSet && (!resolvedSector || !authSet.has(resolvedSector))) {
+        throw new AuthorizationError('غير مصرح لك بتعديل أهداف مندوب خارج نطاق قطاعاتك المصرح بها');
+      }
+
+      const rawVal = item.targetValue === undefined || item.targetValue === null ? 0 : Number(item.targetValue);
+      if (!Number.isFinite(rawVal) || rawVal < 0) {
+        throw new Error(`قيمة الهدف اليدوي غير صالحة للمندوب ${item.repName || repCode}`);
+      }
+
+      const cleanVal = Number(rawVal.toFixed(2));
+      const cleanName = String(item.repName || '').trim();
+      stmt.run(repCode, cleanName, resolvedSector, cleanVal, now);
+      savedCodes.push(repCode);
+    }
+  });
+
+  tx();
+  return Array.from(new Set(savedCodes));
+}
+
 export function getRepsAnalytics(
   db: Database.Database,
   user: UserProfile,
-  params: AnalyticsFilterParams
+  params: AnalyticsFilterParams & { targetMode?: RepTargetMode }
 ): RepMetricRow[] {
   const activeBatch = getActiveBatch(db);
   if (!activeBatch) return [];
   const scope = buildScopeFilter(user, params, activeBatch.id);
+  const effectiveMode: RepTargetMode =
+    params.targetMode === 'manual' ? 'manual' : params.targetMode === 'auto' ? 'auto' : getSavedRepTargetMode(db);
 
   const selectedSector =
     params.sector && params.sector !== 'ALL' && params.sector !== 'undefined' && params.sector !== 'null'
@@ -1449,6 +1633,36 @@ export function getRepsAnalytics(
         ? 'UNLINKED'
         : canonicalizeSectorName(params.sector)
       : 'ALL';
+
+  const manualExactMap = new Map<string, number>();
+  const manualTrimmedMap = new Map<string, number>();
+  try {
+    const manualRows = db
+      .prepare(`SELECT rep_code, target_value FROM rep_manual_targets`)
+      .all() as Array<{ rep_code: string; target_value: number }>;
+    for (const mr of manualRows) {
+      const val = Number(mr.target_value);
+      if (!Number.isFinite(val) || val < 0) continue;
+      const cleanVal = Number(val.toFixed(2));
+      const exact = normalizeCode(mr.rep_code) || String(mr.rep_code || '').trim();
+      if (!exact) continue;
+      manualExactMap.set(exact, cleanVal);
+      const trimmed = stripLeadingZeros(exact);
+      if (trimmed && !manualTrimmedMap.has(trimmed)) {
+        manualTrimmedMap.set(trimmed, cleanVal);
+      }
+    }
+  } catch {
+    // rep_manual_targets may not exist yet in custom unit test mocks
+  }
+  const resolveManualTarget = (repCode: string): number | null => {
+    const exact = normalizeCode(repCode) || String(repCode || '').trim();
+    if (!exact) return null;
+    if (manualExactMap.has(exact)) return manualExactMap.get(exact)!;
+    const trimmed = stripLeadingZeros(exact);
+    if (trimmed && manualTrimmedMap.has(trimmed)) return manualTrimmedMap.get(trimmed)!;
+    return null;
+  };
 
   const repDefs = db
     .prepare(
@@ -1615,7 +1829,8 @@ export function getRepsAnalytics(
     supervisorName: string;
     sales: number;
     tax: number;
-    target: number;
+    autoTarget: number;
+    manualTarget: number | null;
     recordCount: number;
     returnCount: number;
     branchCount: number;
@@ -1645,12 +1860,13 @@ export function getRepsAnalytics(
         selectedSector !== 'UNLINKED' &&
         (user.role === 'admin' || !defSector || scope.authorizedSectors.includes(defSector)) &&
         (selectedSector === 'ALL' || !defSector || defSector === selectedSector);
-      const targetVal =
+      const autoTargetVal =
         branchMeta && branchMeta.target > 0
           ? branchMeta.target
           : defTargetMatchesScope
             ? def!.monthly_target
             : 0;
+      const manualVal = isUnlinked ? null : resolveManualTarget(key);
 
       repBuckets.set(key, {
         repCode: isUnlinked ? 'غير محدد' : key,
@@ -1661,7 +1877,8 @@ export function getRepsAnalytics(
         supervisorName: def?.supervisor_name?.trim() || branchSup || '-',
         sales: r.sales,
         tax: r.tax,
-        target: targetVal,
+        autoTarget: autoTargetVal,
+        manualTarget: manualVal,
         recordCount: r.record_count,
         returnCount: r.return_count,
         branchCount: branchMeta ? branchMeta.targetBranchKeys.size : 0,
@@ -1674,7 +1891,7 @@ export function getRepsAnalytics(
     }
   }
 
-  // Ensure defined reps with targets in the current sector scope stay visible even if 0 sales in a narrowed date range
+  // Ensure defined reps with targets (branch/def auto target OR saved manual target in manual mode) stay visible even if 0 sales in a narrowed date range
   if (selectedSector !== 'UNLINKED') {
     for (const d of repDefs) {
       const key = normalizeCode(d.rep_code);
@@ -1685,13 +1902,15 @@ export function getRepsAnalytics(
       const inSelected = selectedSector === 'ALL' || (defSector && defSector === selectedSector);
       const hasBranchTarget = (branchMeta?.target ?? 0) > 0;
       const hasDefTarget = d.monthly_target > 0 && inAuth && inSelected;
-      if (!hasBranchTarget && !hasDefTarget) continue;
+      const manualVal = resolveManualTarget(key);
+      const hasManualTargetInScope = effectiveMode === 'manual' && manualVal !== null && manualVal > 0 && inAuth && inSelected;
+      if (!hasBranchTarget && !hasDefTarget && !hasManualTargetInScope) continue;
 
       const branchSup =
         branchMeta && branchMeta.supervisors.size > 0
           ? Array.from(branchMeta.supervisors).join('، ')
           : '';
-      const targetVal = hasBranchTarget ? branchMeta!.target : d.monthly_target;
+      const autoTargetVal = hasBranchTarget ? branchMeta!.target : hasDefTarget ? d.monthly_target : 0;
       repBuckets.set(key, {
         repCode: key,
         repName: d.rep_name || key,
@@ -1699,7 +1918,8 @@ export function getRepsAnalytics(
         supervisorName: d.supervisor_name?.trim() || branchSup || '-',
         sales: 0,
         tax: 0,
-        target: targetVal,
+        autoTarget: autoTargetVal,
+        manualTarget: manualVal,
         recordCount: 0,
         returnCount: 0,
         branchCount: branchMeta ? branchMeta.targetBranchKeys.size : 0,
@@ -1709,6 +1929,7 @@ export function getRepsAnalytics(
     for (const [key, branchMeta] of repBranchMetaMap.entries()) {
       if (repBuckets.has(key) || branchMeta.target <= 0) continue;
       const branchSup = branchMeta.supervisors.size > 0 ? Array.from(branchMeta.supervisors).join('، ') : '-';
+      const manualVal = resolveManualTarget(key);
       repBuckets.set(key, {
         repCode: key,
         repName: branchMeta.repName || key,
@@ -1716,7 +1937,8 @@ export function getRepsAnalytics(
         supervisorName: branchSup,
         sales: 0,
         tax: 0,
-        target: branchMeta.target,
+        autoTarget: branchMeta.target,
+        manualTarget: manualVal,
         recordCount: 0,
         returnCount: 0,
         branchCount: branchMeta.targetBranchKeys.size,
@@ -1727,7 +1949,14 @@ export function getRepsAnalytics(
   const result: RepMetricRow[] = Array.from(repBuckets.values()).map((b) => {
     const sales = Number(b.sales.toFixed(2));
     const tax = Number(b.tax.toFixed(2));
-    const target = Number(b.target.toFixed(2));
+    const autoTarget = Number(b.autoTarget.toFixed(2));
+    const manualTarget = b.manualTarget !== null ? Number(b.manualTarget.toFixed(2)) : null;
+    const isUnlinkedRow = b.repCode === 'غير محدد';
+    const target = isUnlinkedRow
+      ? 0
+      : effectiveMode === 'manual'
+        ? manualTarget ?? 0
+        : autoTarget;
     return {
       repCode: b.repCode,
       repName: b.repName,
@@ -1736,6 +1965,8 @@ export function getRepsAnalytics(
       sales,
       tax,
       target,
+      autoTarget,
+      manualTarget,
       achievementPct: calculateAchievementPct(sales, target, tax),
       recordCount: b.recordCount,
       returnCount: b.returnCount,
@@ -3057,7 +3288,7 @@ export function getSalesTransactions(
         sr.item_code, COALESCE(sr.resolved_item_name, sr.item_name) AS item_name,
         COALESCE(sr.resolved_rep_code, sr.rep_code) AS rep_code,
         COALESCE(sr.resolved_rep_name, '') AS rep_name,
-        sr.quantity, sr.sales_value, sr.tax_value,
+        sr.quantity, sr.sales_value, sr.net_sales_value, sr.tax_value,
         sr.resolved_sector, sr.resolved_department, sr.resolved_chain_name,
         sr.resolved_branch_code, sr.resolved_branch_name, sr.is_return
        FROM sales_records sr
@@ -3080,6 +3311,7 @@ export function getSalesTransactions(
     rep_name: string;
     quantity: number;
     sales_value: number;
+    net_sales_value: number;
     tax_value: number;
     resolved_sector: string | null;
     resolved_department: string | null;
@@ -3105,6 +3337,7 @@ export function getSalesTransactions(
       repName: r.rep_name,
       quantity: r.quantity,
       salesValue: Number(r.sales_value.toFixed(2)),
+      netSalesValue: Number((r.net_sales_value ?? 0).toFixed(2)),
       taxValue: Number(r.tax_value.toFixed(2)),
       resolvedSector: r.resolved_sector,
       resolvedDepartment: r.resolved_department,

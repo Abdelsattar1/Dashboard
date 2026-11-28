@@ -1,7 +1,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type Database from 'better-sqlite3';
 import { ORIGINAL_SECTORS } from '../../server/excel-engine.ts';
-import type { ImportBatchHistoryItem, UserProfile, UserRole } from '../types/bi.ts';
+import type { ImportBatchHistoryItem, RepTargetMode, UserProfile, UserRole } from '../types/bi.ts';
 import {
   CLIENT_DEFAULT_ADMIN_SEED,
   CLIENT_DEFAULT_ADMIN_USERNAME,
@@ -40,9 +40,16 @@ export function getSupabaseClient(): SupabaseClient {
 function formatSupabaseError(err: { code?: string; message?: string } | null | undefined, fallback: string): Error {
   if (!err) return new Error(fallback);
   if (err.code === '42P01' || err.code === 'PGRST205') {
-    return new Error('جداول Supabase غير منشأة بعد. يرجى نسخ كود SQL من تبويب «ربط Supabase و SQL» وتشغيله في Supabase SQL Editor.');
+    return new Error(
+      'جداول Supabase غير منشأة أو تحتاج تحديث Schema (قم بتشغيل كود SQL المحدّث مع NOTIFY pgrst, \'reload schema\'; في Supabase SQL Editor).'
+    );
   }
   return new Error(err.message || fallback);
+}
+
+function isMissingTableError(err: { code?: string; message?: string } | null | undefined): boolean {
+  if (!err) return false;
+  return err.code === '42P01' || err.code === 'PGRST205';
 }
 
 export interface SupabaseAppUserRow {
@@ -309,37 +316,72 @@ function extractMonthKey(billingDate: string | null | undefined): string {
 export async function syncSupabaseToLocalDb(db: Database.Database, opts?: { forceBatch?: boolean }): Promise<void> {
   const sb = getSupabaseClient();
 
-  const [usersRes, catTargetsRes, compsRes, compItemsRes, compTargetsRes, errorsRes, backupsRes, activeBatchRes] =
-    await Promise.all([
-      sb.from('app_users').select('*').order('id', { ascending: true }),
-      fetchAllPaged<{
-        id: number;
-        target_key: string;
-        sector_name: string;
-        job_title: string;
-        employee_name: string;
-        category_name: string;
-        target_value: number;
-        updated_at: string;
-      }>('item_category_targets'),
-      sb.from('competitions').select('*').order('id', { ascending: true }),
-      fetchAllPaged<{ id: number; competition_id: number; item_code: string; item_name: string; equivalent_factor: number }>(
-        'competition_items'
-      ),
-      fetchAllPaged<{
-        id: number;
-        competition_id: number;
-        participant_key: string;
-        target_qty: number;
-        industrial_target_qty: number;
-        commercial_target_qty: number;
-      }>('competition_targets'),
-      sb.from('runtime_error_logs').select('*').eq('resolved', false).order('id', { ascending: false }).limit(100),
-      sb.from('audit_fix_backups').select('*').order('id', { ascending: false }).limit(30),
-      sb.from('import_batches').select('*').eq('status', 'active').order('id', { ascending: false }).limit(1).maybeSingle(),
-    ]);
+  const fetchOptionalPaged = async <T>(table: string): Promise<{ ok: boolean; rows: T[] }> => {
+    try {
+      const rows = await fetchAllPaged<T>(table);
+      return { ok: true, rows };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      if (msg.includes('جداول Supabase')) {
+        return { ok: false, rows: [] };
+      }
+      throw err;
+    }
+  };
+
+  const [
+    usersRes,
+    catTargetsRes,
+    repManualTargetsRes,
+    appSettingsRes,
+    compsRes,
+    compItemsRes,
+    compTargetsRes,
+    errorsRes,
+    backupsRes,
+    activeBatchRes,
+  ] = await Promise.all([
+    sb.from('app_users').select('*').order('id', { ascending: true }),
+    fetchAllPaged<{
+      id: number;
+      target_key: string;
+      sector_name: string;
+      job_title: string;
+      employee_name: string;
+      category_name: string;
+      target_value: number;
+      updated_at: string;
+    }>('item_category_targets'),
+    fetchOptionalPaged<{
+      id: number;
+      rep_code: string;
+      rep_name: string;
+      sector_name: string;
+      target_value: number;
+      updated_at: string;
+    }>('rep_manual_targets'),
+    sb.from('app_settings').select('*'),
+    sb.from('competitions').select('*').order('id', { ascending: true }),
+    fetchAllPaged<{ id: number; competition_id: number; item_code: string; item_name: string; equivalent_factor: number }>(
+      'competition_items'
+    ),
+    fetchAllPaged<{
+      id: number;
+      competition_id: number;
+      participant_key: string;
+      target_qty: number;
+      industrial_target_qty: number;
+      commercial_target_qty: number;
+    }>('competition_targets'),
+    sb.from('runtime_error_logs').select('*').eq('resolved', false).order('id', { ascending: false }).limit(100),
+    sb.from('audit_fix_backups').select('*').order('id', { ascending: false }).limit(30),
+    sb.from('import_batches').select('*').eq('status', 'active').order('id', { ascending: false }).limit(1).maybeSingle(),
+  ]);
 
   if (usersRes.error) throw formatSupabaseError(usersRes.error, 'تعذر مزامنة المستخدمين');
+  if (appSettingsRes.error && !isMissingTableError(appSettingsRes.error)) {
+    throw formatSupabaseError(appSettingsRes.error, 'تعذر مزامنة إعدادات التطبيق');
+  }
   if (compsRes.error) throw formatSupabaseError(compsRes.error, 'تعذر مزامنة المسابقات');
   if (errorsRes.error) throw formatSupabaseError(errorsRes.error, 'تعذر مزامنة سجل الأخطاء');
   if (backupsRes.error) throw formatSupabaseError(backupsRes.error, 'تعذر مزامنة النسخ الاحتياطية');
@@ -356,9 +398,11 @@ export async function syncSupabaseToLocalDb(db: Database.Database, opts?: { forc
         status: 'active' | 'archived';
         vf05n_count: number;
         vf05n_sales_total: number;
+        vf05n_net_sales_total?: number;
         vf05n_tax_total: number;
         zsales_count: number;
         zsales_sales_total: number;
+        zsales_net_sales_total?: number;
         zsales_tax_total: number;
         unlinked_branch_count: number;
         unlinked_sector_count: number;
@@ -430,6 +474,7 @@ export async function syncSupabaseToLocalDb(db: Database.Database, opts?: { forc
     rep_code: string | null;
     quantity: number;
     sales_value: number;
+    net_sales_value?: number;
     tax_value: number;
     resolved_sector: string | null;
     resolved_department: string | null;
@@ -512,6 +557,33 @@ export async function syncSupabaseToLocalDb(db: Database.Database, opts?: { forc
       );
       for (const ct of catTargetsRes) {
         insCatT.run(ct.id, ct.target_key, ct.sector_name, ct.job_title, ct.employee_name, ct.category_name, ct.target_value, ct.updated_at);
+      }
+
+      // 2b. Sync rep_manual_targets & app_settings (if tables exist in Supabase)
+      if (repManualTargetsRes.ok) {
+        db.prepare(`DELETE FROM rep_manual_targets`).run();
+        const insRepManual = db.prepare(
+          `INSERT INTO rep_manual_targets (id, rep_code, rep_name, sector_name, target_value, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        );
+        for (const rm of repManualTargetsRes.rows) {
+          insRepManual.run(rm.id, rm.rep_code, rm.rep_name, rm.sector_name, rm.target_value, rm.updated_at);
+        }
+      }
+      if (!appSettingsRes.error) {
+        db.prepare(`DELETE FROM app_settings`).run();
+        const insSetting = db.prepare(
+          `INSERT INTO app_settings (id, setting_key, setting_value, updated_at)
+           VALUES (?, ?, ?, ?)`
+        );
+        for (const st of (appSettingsRes.data || []) as Array<{
+          id: number;
+          setting_key: string;
+          setting_value: string;
+          updated_at: string;
+        }>) {
+          insSetting.run(st.id, st.setting_key, st.setting_value, st.updated_at);
+        }
       }
 
       // 3. Sync competitions + items + targets
@@ -634,10 +706,10 @@ export async function syncSupabaseToLocalDb(db: Database.Database, opts?: { forc
         db.prepare(
           `INSERT INTO import_batches (
             id, batch_uuid, filename, imported_by_id, imported_by_name, status,
-            vf05n_count, vf05n_sales_total, vf05n_tax_total,
-            zsales_count, zsales_sales_total, zsales_tax_total,
+            vf05n_count, vf05n_sales_total, vf05n_net_sales_total, vf05n_tax_total,
+            zsales_count, zsales_sales_total, zsales_net_sales_total, zsales_tax_total,
             unlinked_branch_count, unlinked_sector_count, has_category_targets_sheet, validation_report, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(
           remoteBatch.id,
           remoteBatch.batch_uuid,
@@ -647,9 +719,11 @@ export async function syncSupabaseToLocalDb(db: Database.Database, opts?: { forc
           remoteBatch.status,
           remoteBatch.vf05n_count,
           remoteBatch.vf05n_sales_total,
+          remoteBatch.vf05n_net_sales_total ?? 0,
           remoteBatch.vf05n_tax_total,
           remoteBatch.zsales_count,
           remoteBatch.zsales_sales_total,
+          remoteBatch.zsales_net_sales_total ?? 0,
           remoteBatch.zsales_tax_total,
           remoteBatch.unlinked_branch_count,
           remoteBatch.unlinked_sector_count,
@@ -729,11 +803,11 @@ export async function syncSupabaseToLocalDb(db: Database.Database, opts?: { forc
           `INSERT INTO sales_records (
             id, batch_id, source_type, doc_number, billing_date,
             payer_code, payer_name, sold_to_code, sold_to_name,
-            item_code, item_name, rep_code, quantity, sales_value, tax_value,
+            item_code, item_name, rep_code, quantity, sales_value, net_sales_value, tax_value,
             resolved_sector, resolved_department, resolved_chain_name,
             resolved_branch_code, resolved_branch_name, resolved_rep_code, resolved_rep_name, resolved_item_name,
             is_return
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         );
         for (const sr of batchSales) {
           insSale.run(
@@ -751,6 +825,7 @@ export async function syncSupabaseToLocalDb(db: Database.Database, opts?: { forc
             sr.rep_code,
             sr.quantity,
             sr.sales_value,
+            sr.net_sales_value ?? 0,
             sr.tax_value,
             sr.resolved_sector,
             sr.resolved_department,
@@ -781,9 +856,11 @@ export async function supabasePushCommittedBatch(db: Database.Database, localBat
     imported_by_name: string;
     vf05n_count: number;
     vf05n_sales_total: number;
+    vf05n_net_sales_total: number;
     vf05n_tax_total: number;
     zsales_count: number;
     zsales_sales_total: number;
+    zsales_net_sales_total: number;
     zsales_tax_total: number;
     unlinked_branch_count: number;
     unlinked_sector_count: number;
@@ -815,7 +892,7 @@ export async function supabasePushCommittedBatch(db: Database.Database, localBat
     .all(localBatchId) as Array<Record<string, unknown>>;
   const sales = db
     .prepare(
-      `SELECT source_type, doc_number, billing_date, payer_code, payer_name, sold_to_code, sold_to_name, item_code, item_name, rep_code, quantity, sales_value, tax_value, resolved_sector, resolved_department, resolved_chain_name, resolved_branch_code, resolved_branch_name, resolved_rep_code, resolved_rep_name, resolved_item_name, is_return
+      `SELECT source_type, doc_number, billing_date, payer_code, payer_name, sold_to_code, sold_to_name, item_code, item_name, rep_code, quantity, sales_value, net_sales_value, tax_value, resolved_sector, resolved_department, resolved_chain_name, resolved_branch_code, resolved_branch_name, resolved_rep_code, resolved_rep_name, resolved_item_name, is_return
        FROM sales_records WHERE batch_id = ?`
     )
     .all(localBatchId) as Array<Record<string, unknown>>;
@@ -841,9 +918,11 @@ export async function supabasePushCommittedBatch(db: Database.Database, localBat
       status: 'active',
       vf05n_count: batchRow.vf05n_count,
       vf05n_sales_total: batchRow.vf05n_sales_total,
+      vf05n_net_sales_total: batchRow.vf05n_net_sales_total ?? 0,
       vf05n_tax_total: batchRow.vf05n_tax_total,
       zsales_count: batchRow.zsales_count,
       zsales_sales_total: batchRow.zsales_sales_total,
+      zsales_net_sales_total: batchRow.zsales_net_sales_total ?? 0,
       zsales_tax_total: batchRow.zsales_tax_total,
       unlinked_branch_count: batchRow.unlinked_branch_count,
       unlinked_sector_count: batchRow.unlinked_sector_count,
@@ -957,9 +1036,11 @@ export async function supabasePushCommittedBatch(db: Database.Database, localBat
     status: 'active',
     vf05nCount: batchRow.vf05n_count,
     vf05nSalesTotal: batchRow.vf05n_sales_total,
+    vf05nNetSalesTotal: batchRow.vf05n_net_sales_total ?? 0,
     vf05nTaxTotal: batchRow.vf05n_tax_total,
     zsalesCount: batchRow.zsales_count,
     zsalesSalesTotal: batchRow.zsales_sales_total,
+    zsalesNetSalesTotal: batchRow.zsales_net_sales_total ?? 0,
     zsalesTaxTotal: batchRow.zsales_tax_total,
     unlinkedBranchCount: batchRow.unlinked_branch_count,
     unlinkedSectorCount: batchRow.unlinked_sector_count,
@@ -979,9 +1060,11 @@ export async function supabaseListImportBatches(): Promise<ImportBatchHistoryIte
     status: 'active' | 'archived';
     vf05n_count: number;
     vf05n_sales_total: number;
+    vf05n_net_sales_total?: number;
     vf05n_tax_total: number;
     zsales_count: number;
     zsales_sales_total: number;
+    zsales_net_sales_total?: number;
     zsales_tax_total: number;
     unlinked_branch_count: number;
     unlinked_sector_count: number;
@@ -994,9 +1077,11 @@ export async function supabaseListImportBatches(): Promise<ImportBatchHistoryIte
     status: r.status,
     vf05nCount: r.vf05n_count,
     vf05nSalesTotal: r.vf05n_sales_total,
+    vf05nNetSalesTotal: r.vf05n_net_sales_total ?? 0,
     vf05nTaxTotal: r.vf05n_tax_total,
     zsalesCount: r.zsales_count,
     zsalesSalesTotal: r.zsales_sales_total,
+    zsalesNetSalesTotal: r.zsales_net_sales_total ?? 0,
     zsalesTaxTotal: r.zsales_tax_total,
     unlinkedBranchCount: r.unlinked_branch_count,
     unlinkedSectorCount: r.unlinked_sector_count,
@@ -1025,9 +1110,11 @@ export async function supabaseRollbackToBatch(db: Database.Database, batchId: nu
     imported_by_name: string;
     vf05n_count: number;
     vf05n_sales_total: number;
+    vf05n_net_sales_total?: number;
     vf05n_tax_total: number;
     zsales_count: number;
     zsales_sales_total: number;
+    zsales_net_sales_total?: number;
     zsales_tax_total: number;
     unlinked_branch_count: number;
     unlinked_sector_count: number;
@@ -1041,9 +1128,11 @@ export async function supabaseRollbackToBatch(db: Database.Database, batchId: nu
     status: 'active',
     vf05nCount: r.vf05n_count,
     vf05nSalesTotal: r.vf05n_sales_total,
+    vf05nNetSalesTotal: r.vf05n_net_sales_total ?? 0,
     vf05nTaxTotal: r.vf05n_tax_total,
     zsalesCount: r.zsales_count,
     zsalesSalesTotal: r.zsales_sales_total,
+    zsalesNetSalesTotal: r.zsales_net_sales_total ?? 0,
     zsalesTaxTotal: r.zsales_tax_total,
     unlinkedBranchCount: r.unlinked_branch_count,
     unlinkedSectorCount: r.unlinked_sector_count,
@@ -1070,6 +1159,43 @@ export async function supabaseSyncItemCategoryTargetsFromDb(db: Database.Databas
     const { error } = await sb.from('item_category_targets').upsert(slice, { onConflict: 'target_key' });
     if (error) throw formatSupabaseError(error, 'تعذر مزامنة أهداف الفئات مع Supabase');
   }
+}
+
+export async function supabaseUpsertRepManualTargetsFromDb(
+  db: Database.Database,
+  repCodes?: string[]
+): Promise<void> {
+  const sb = getSupabaseClient();
+  const allRows = db
+    .prepare(`SELECT rep_code, rep_name, sector_name, target_value, updated_at FROM rep_manual_targets`)
+    .all() as Array<{
+    rep_code: string;
+    rep_name: string;
+    sector_name: string;
+    target_value: number;
+    updated_at: string;
+  }>;
+  const codeSet = repCodes && repCodes.length > 0 ? new Set(repCodes) : null;
+  const rows = codeSet ? allRows.filter((r) => codeSet.has(r.rep_code)) : allRows;
+  if (rows.length === 0) return;
+  for (let i = 0; i < rows.length; i += 300) {
+    const slice = rows.slice(i, i + 300);
+    const { error } = await sb.from('rep_manual_targets').upsert(slice, { onConflict: 'rep_code' });
+    if (error) throw formatSupabaseError(error, 'تعذر حفظ الأهداف اليدوية للمناديب في Supabase');
+  }
+}
+
+export async function supabaseSaveRepTargetMode(mode: RepTargetMode): Promise<void> {
+  const sb = getSupabaseClient();
+  const { error } = await sb.from('app_settings').upsert(
+    {
+      setting_key: 'rep_target_mode',
+      setting_value: mode === 'manual' ? 'manual' : 'auto',
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'setting_key' }
+  );
+  if (error) throw formatSupabaseError(error, 'تعذر حفظ وضع أهداف المناديب في Supabase');
 }
 
 export async function supabaseCreateCompetition(

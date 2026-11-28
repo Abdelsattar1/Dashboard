@@ -101,13 +101,15 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
   const pageTotals = useMemo(() => {
     let quantity = 0;
     let salesValue = 0;
+    let netSalesValue = 0;
     let taxValue = 0;
     for (const r of rows) {
       quantity += r.quantity;
       salesValue += r.salesValue;
+      netSalesValue += r.netSalesValue ?? 0;
       taxValue += r.taxValue;
     }
-    return { quantity, salesValue, taxValue };
+    return { quantity, salesValue, netSalesValue, taxValue };
   }, [rows]);
 
   const getExportMeta = () => {
@@ -136,7 +138,8 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
       { header: 'كود الصنف', key: 'itemCode', type: 'string', minWidth: 14 },
       { header: 'الصنف', key: 'itemName', type: 'string', minWidth: 24 },
       { header: 'الكمية', key: 'quantity', type: 'qty', minWidth: 12 },
-      { header: 'المبيعات (BD&T)', key: 'salesValue', type: 'currency', minWidth: 16 },
+      { header: 'إجمالي قيمة المبيعات', key: 'salesValue', type: 'currency', minWidth: 16 },
+      { header: 'صافي قيمة المبيعات', key: 'netSalesValue', type: 'currency', minWidth: 16 },
       { header: 'الضريبة', key: 'taxValue', type: 'currency', minWidth: 14 },
     ];
 
@@ -152,6 +155,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
       itemName: r.itemName || '—',
       quantity: r.quantity,
       salesValue: r.salesValue,
+      netSalesValue: r.netSalesValue ?? 0,
       taxValue: r.taxValue,
     }));
 
@@ -169,6 +173,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
             itemName: '',
             quantity: pageTotals.quantity,
             salesValue: pageTotals.salesValue,
+            netSalesValue: pageTotals.netSalesValue,
             taxValue: pageTotals.taxValue,
           }
         : null;
@@ -225,7 +230,8 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
       'كود الصنف',
       'الصنف',
       'الكمية',
-      'المبيعات',
+      'إجمالي قيمة المبيعات',
+      'صافي قيمة المبيعات',
       'الضريبة',
     ];
     const csvRows = [
@@ -244,6 +250,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
           `"${r.itemName.replace(/"/g, '""')}"`,
           r.quantity,
           r.salesValue,
+          r.netSalesValue ?? 0,
           r.taxValue,
         ].join(',')
       ),
@@ -323,20 +330,21 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
               <th className="py-3 px-3">الفرع</th>
               <th className="py-3 px-3">الصنف</th>
               <th className="py-3 px-3">الكمية</th>
-              <th className="py-3 px-3">المبيعات (BD&T)</th>
+              <th className="py-3 px-3">إجمالي قيمة المبيعات</th>
+              <th className="py-3 px-3">صافي قيمة المبيعات</th>
               <th className="py-3 px-3">الضريبة</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {loading ? (
               <tr>
-                <td colSpan={10} className="py-10 text-center text-slate-500">
+                <td colSpan={11} className="py-10 text-center text-slate-500">
                   جاري تحميل السجلات...
                 </td>
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td colSpan={10} className="py-10 text-center text-slate-500">
+                <td colSpan={11} className="py-10 text-center text-slate-500">
                   لا توجد سجلات مطابقة لمعايير البحث الحالية
                 </td>
               </tr>
@@ -366,6 +374,9 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
                   <td className={`py-2.5 px-3 font-num font-semibold whitespace-nowrap ${r.isReturn ? 'text-rose-700' : 'text-slate-900'}`}>
                     {formatEGP(r.salesValue)}
                   </td>
+                  <td className={`py-2.5 px-3 font-num font-semibold whitespace-nowrap ${r.isReturn ? 'text-rose-700' : 'text-teal-800'}`}>
+                    {formatEGP(r.netSalesValue ?? 0)}
+                  </td>
                   <td className="py-2.5 px-3 font-num text-slate-600 whitespace-nowrap">{formatEGP(r.taxValue)}</td>
                 </tr>
               ))
@@ -382,6 +393,9 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
                 </td>
                 <td className="py-2.5 px-3 font-num tabular-nums whitespace-nowrap" dir="ltr">
                   {formatEGP(pageTotals.salesValue)}
+                </td>
+                <td className="py-2.5 px-3 font-num tabular-nums whitespace-nowrap text-teal-800" dir="ltr">
+                  {formatEGP(pageTotals.netSalesValue)}
                 </td>
                 <td className="py-2.5 px-3 font-num tabular-nums whitespace-nowrap" dir="ltr">
                   {formatEGP(pageTotals.taxValue)}

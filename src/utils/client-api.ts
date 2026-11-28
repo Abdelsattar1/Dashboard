@@ -6,9 +6,13 @@ import {
   getItemsAnalytics,
   getRepsAnalytics,
   getSalesTransactions,
+  getSavedRepTargetMode,
   getTimelineSeries,
   saveItemCategoryTargets,
+  saveRepManualTargets,
+  saveRepTargetMode,
   type ItemCategoryTargetInput,
+  type RepManualTargetInput,
 } from '../../server/analytics-engine.ts';
 import {
   createCompetition,
@@ -67,11 +71,13 @@ import {
   supabaseListUsers,
   supabasePushCommittedBatch,
   supabaseRollbackToBatch,
+  supabaseSaveRepTargetMode,
   supabaseSyncCompetitionTargetsFromDb,
   supabaseSyncItemCategoryTargetsFromDb,
   supabaseTestConnection,
   supabaseUpdateCompetition,
   supabaseUpdateUser,
+  supabaseUpsertRepManualTargetsFromDb,
   syncSupabaseToLocalDb,
 } from './supabase-sync.ts';
 import type Database from 'better-sqlite3';
@@ -379,9 +385,56 @@ export async function handleClientApiRequest<T>(
     const startDate = searchParams.get('startDate')?.trim() || undefined;
     const endDate = searchParams.get('endDate')?.trim() || undefined;
     const sector = searchParams.get('sector')?.trim() || undefined;
-    const reps = getRepsAnalytics(db, u, { source, startDate, endDate, sector });
+    const rawMode = searchParams.get('targetMode')?.trim() || '';
+    const targetMode =
+      rawMode === 'manual' || rawMode === 'auto' ? rawMode : getSavedRepTargetMode(db);
+    const reps = getRepsAnalytics(db, u, { source, startDate, endDate, sector, targetMode });
     const { diagnostics } = getBranchesAnalytics(db, u, { source, startDate, endDate, sector });
-    return { reps, diagnostics } as T;
+    return { reps, targetMode, diagnostics } as T;
+  }
+
+  if (pathname === '/api/analytics/reps/target-mode' && method === 'PUT') {
+    const u = requireTargetEditorUser(currentUser);
+    const { targetMode } = parseJsonBody<{ targetMode?: string }>(options.body);
+    if (targetMode !== 'auto' && targetMode !== 'manual') {
+      throw new ClientHttpError(400, 'وضع الأهداف غير صالح (يجب أن يكون auto أو manual)');
+    }
+    try {
+      const saved = saveRepTargetMode(db, targetMode, u);
+      if (useSupabase) {
+        await supabaseSaveRepTargetMode(saved);
+        lastCloudSyncAt = Date.now();
+      }
+      await persistClientDb();
+      return { success: true, targetMode: saved } as T;
+    } catch (err) {
+      if (err instanceof AuthorizationError) {
+        throw new ClientHttpError(403, err.message);
+      }
+      throw new ClientHttpError(400, err instanceof Error ? err.message : 'تعذر تحديث وضع أهداف المناديب');
+    }
+  }
+
+  if (pathname === '/api/analytics/reps/manual-targets' && method === 'PUT') {
+    const u = requireTargetEditorUser(currentUser);
+    const { targets } = parseJsonBody<{ targets?: RepManualTargetInput[] }>(options.body);
+    if (!Array.isArray(targets)) {
+      throw new ClientHttpError(400, 'صيغة أهداف المناديب غير صالحة');
+    }
+    try {
+      const savedCodes = saveRepManualTargets(db, targets, u);
+      if (useSupabase) {
+        await supabaseUpsertRepManualTargetsFromDb(db, savedCodes);
+        lastCloudSyncAt = Date.now();
+      }
+      await persistClientDb();
+      return { success: true } as T;
+    } catch (err) {
+      if (err instanceof AuthorizationError) {
+        throw new ClientHttpError(403, err.message);
+      }
+      throw new ClientHttpError(400, err instanceof Error ? err.message : 'تعذر حفظ الأهداف اليدوية للمناديب');
+    }
   }
 
   if (pathname === '/api/analytics/items' && method === 'GET') {
@@ -617,9 +670,11 @@ export async function handleClientApiRequest<T>(
       status: 'active' | 'archived';
       vf05n_count: number;
       vf05n_sales_total: number;
+      vf05n_net_sales_total?: number;
       vf05n_tax_total: number;
       zsales_count: number;
       zsales_sales_total: number;
+      zsales_net_sales_total?: number;
       zsales_tax_total: number;
       unlinked_branch_count: number;
       unlinked_sector_count: number;
@@ -633,9 +688,11 @@ export async function handleClientApiRequest<T>(
       status: r.status,
       vf05nCount: r.vf05n_count,
       vf05nSalesTotal: r.vf05n_sales_total,
+      vf05nNetSalesTotal: r.vf05n_net_sales_total ?? 0,
       vf05nTaxTotal: r.vf05n_tax_total,
       zsalesCount: r.zsales_count,
       zsalesSalesTotal: r.zsales_sales_total,
+      zsalesNetSalesTotal: r.zsales_net_sales_total ?? 0,
       zsalesTaxTotal: r.zsales_tax_total,
       unlinkedBranchCount: r.unlinked_branch_count,
       unlinkedSectorCount: r.unlinked_sector_count,

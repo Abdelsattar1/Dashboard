@@ -561,15 +561,21 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
               {/* Metrics Comparison Preview */}
               <div className="p-5 grid grid-cols-1 md:grid-cols-4 gap-4 border-b border-slate-200 text-xs">
                 <div>
-                  <div className="text-slate-500 mb-1">مبيعات VF05N (2)</div>
+                  <div className="text-slate-500 mb-1">VF05N (2) — إجمالي قيمة المبيعات (New Growth Value BD&amp;T)</div>
                   <div className="text-sm font-bold font-num text-slate-900">{formatEGP(report.comparison?.vf05n?.salesTotal)}</div>
+                  <div className="text-teal-800 font-semibold mt-0.5 font-num">
+                    صافي قيمة المبيعات (New Net Value BT): {formatEGP(report.comparison?.vf05n?.netSalesTotal ?? 0)}
+                  </div>
                   <div className="text-slate-500 mt-0.5 font-num">
                     الضريبة: {formatEGP(report.comparison?.vf05n?.taxTotal)} · {formatNum(report.comparison?.vf05n?.count)} سجل
                   </div>
                 </div>
                 <div>
-                  <div className="text-slate-500 mb-1">مبيعات Zsales_Price (2)</div>
+                  <div className="text-slate-500 mb-1">Zsales_Price (2) — إجمالي قيمة المبيعات (New Growth Value BD&amp;T)</div>
                   <div className="text-sm font-bold font-num text-slate-900">{formatEGP(report.comparison?.zsales?.salesTotal)}</div>
+                  <div className="text-teal-800 font-semibold mt-0.5 font-num">
+                    صافي قيمة المبيعات (Net Value Without TA): {formatEGP(report.comparison?.zsales?.netSalesTotal ?? 0)}
+                  </div>
                   <div className="text-slate-500 mt-0.5 font-num">
                     الضريبة: {formatEGP(report.comparison?.zsales?.taxTotal)} · {formatNum(report.comparison?.zsales?.count)} سجل
                   </div>
@@ -623,13 +629,13 @@ export const ImportAdminView: React.FC<ImportAdminViewProps> = ({
                             {p.action === 'replace' ? 'استبدال الشهر الموجود فقط' : 'إضافة شهر جديد (حفظ السابق)'}
                           </span>
                         </div>
-                        <div className="text-[11px] text-slate-600 font-num flex items-center justify-between">
+                        <div className="text-[11px] text-slate-600 font-num flex items-center justify-between gap-2">
                           <span>VF05N: {formatNum(p.vf05nCount)} سجل</span>
-                          <span>{formatEGP(p.vf05nSalesTotal)}</span>
+                          <span>إجمالي: {formatEGP(p.vf05nSalesTotal)} · صافي: {formatEGP(p.vf05nNetSalesTotal ?? 0)}</span>
                         </div>
-                        <div className="text-[11px] text-slate-600 font-num flex items-center justify-between">
+                        <div className="text-[11px] text-slate-600 font-num flex items-center justify-between gap-2">
                           <span>Zsales: {formatNum(p.zsalesCount)} سجل</span>
-                          <span>{formatEGP(p.zsalesSalesTotal)}</span>
+                          <span>إجمالي: {formatEGP(p.zsalesSalesTotal)} · صافي: {formatEGP(p.zsalesNetSalesTotal ?? 0)}</span>
                         </div>
                       </div>
                     ))}

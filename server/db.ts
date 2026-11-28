@@ -52,9 +52,11 @@ export function initDatabase(customPath?: string): Database.Database {
       status TEXT NOT NULL CHECK(status IN ('active', 'archived')),
       vf05n_count INTEGER NOT NULL DEFAULT 0,
       vf05n_sales_total REAL NOT NULL DEFAULT 0,
+      vf05n_net_sales_total REAL NOT NULL DEFAULT 0,
       vf05n_tax_total REAL NOT NULL DEFAULT 0,
       zsales_count INTEGER NOT NULL DEFAULT 0,
       zsales_sales_total REAL NOT NULL DEFAULT 0,
+      zsales_net_sales_total REAL NOT NULL DEFAULT 0,
       zsales_tax_total REAL NOT NULL DEFAULT 0,
       unlinked_branch_count INTEGER NOT NULL DEFAULT 0,
       unlinked_sector_count INTEGER NOT NULL DEFAULT 0,
@@ -169,6 +171,22 @@ export function initDatabase(customPath?: string): Database.Database {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS rep_manual_targets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rep_code TEXT UNIQUE NOT NULL,
+      rep_name TEXT NOT NULL DEFAULT '',
+      sector_name TEXT NOT NULL DEFAULT '',
+      target_value REAL NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      setting_key TEXT UNIQUE NOT NULL,
+      setting_value TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS sales_records (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       batch_id INTEGER NOT NULL REFERENCES import_batches(id) ON DELETE CASCADE,
@@ -184,6 +202,7 @@ export function initDatabase(customPath?: string): Database.Database {
       rep_code TEXT,
       quantity REAL NOT NULL DEFAULT 0,
       sales_value REAL NOT NULL DEFAULT 0,
+      net_sales_value REAL NOT NULL DEFAULT 0,
       tax_value REAL NOT NULL DEFAULT 0,
       resolved_sector TEXT,
       resolved_department TEXT,
@@ -250,6 +269,8 @@ export function initDatabase(customPath?: string): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_comp_items_comp ON competition_items(competition_id);
     CREATE INDEX IF NOT EXISTS idx_comp_targets_comp ON competition_targets(competition_id);
     CREATE INDEX IF NOT EXISTS idx_item_cat_targets_key ON item_category_targets(target_key);
+    CREATE INDEX IF NOT EXISTS idx_rep_manual_targets_code ON rep_manual_targets(rep_code);
+    CREATE INDEX IF NOT EXISTS idx_app_settings_key ON app_settings(setting_key);
     CREATE INDEX IF NOT EXISTS idx_runtime_errors_resolved ON runtime_error_logs(resolved, occurred_at);
     CREATE INDEX IF NOT EXISTS idx_audit_runs_created ON audit_runs(created_at);
     CREATE INDEX IF NOT EXISTS idx_audit_backups_created ON audit_fix_backups(created_at);
@@ -291,10 +312,22 @@ export function initDatabase(customPath?: string): Database.Database {
     db.exec(`ALTER TABLE items ADD COLUMN top_retail_category TEXT NOT NULL DEFAULT ''`);
   }
 
-  // Idempotent migration for has_category_targets_sheet on import_batches
+  // Idempotent migration for has_category_targets_sheet and net sales totals on import_batches
   const batchCols = db.prepare(`PRAGMA table_info(import_batches)`).all() as Array<{ name: string }>;
   if (!batchCols.some((c) => c.name === 'has_category_targets_sheet')) {
     db.exec(`ALTER TABLE import_batches ADD COLUMN has_category_targets_sheet INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!batchCols.some((c) => c.name === 'vf05n_net_sales_total')) {
+    db.exec(`ALTER TABLE import_batches ADD COLUMN vf05n_net_sales_total REAL NOT NULL DEFAULT 0`);
+  }
+  if (!batchCols.some((c) => c.name === 'zsales_net_sales_total')) {
+    db.exec(`ALTER TABLE import_batches ADD COLUMN zsales_net_sales_total REAL NOT NULL DEFAULT 0`);
+  }
+
+  // Idempotent migration for net_sales_value on sales_records
+  const salesCols = db.prepare(`PRAGMA table_info(sales_records)`).all() as Array<{ name: string }>;
+  if (!salesCols.some((c) => c.name === 'net_sales_value')) {
+    db.exec(`ALTER TABLE sales_records ADD COLUMN net_sales_value REAL NOT NULL DEFAULT 0`);
   }
 
   // Idempotent migration for industrial_target_qty / commercial_target_qty on competition_targets

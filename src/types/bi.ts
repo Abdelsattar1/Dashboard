@@ -42,6 +42,7 @@ export interface LoginResponse {
 export interface SectorMetricRow {
   sectorName: string;
   sales: number;
+  netSales: number;
   tax: number;
   target: number;
   variance: number;
@@ -58,6 +59,7 @@ export interface AggregationMetricRow {
   subtitle: string;
   includedSectors: string[];
   sales: number;
+  netSales: number;
   tax: number;
   target: number;
   variance: number;
@@ -69,16 +71,19 @@ export interface SourceComparisonSummary {
   vf05n: {
     count: number;
     salesTotal: number;
+    netSalesTotal: number;
     taxTotal: number;
     returnCount: number;
   };
   zsales: {
     count: number;
     salesTotal: number;
+    netSalesTotal: number;
     taxTotal: number;
     returnCount: number;
   };
   salesDifference: number;
+  netSalesDifference: number;
   taxDifference: number;
   isMatched: boolean;
 }
@@ -91,9 +96,11 @@ export interface ActiveBatchInfo {
   createdAt: string;
   vf05nCount: number;
   vf05nSalesTotal: number;
+  vf05nNetSalesTotal: number;
   vf05nTaxTotal: number;
   zsalesCount: number;
   zsalesSalesTotal: number;
+  zsalesNetSalesTotal: number;
   zsalesTaxTotal: number;
   unlinkedBranchCount: number;
   unlinkedSectorCount: number;
@@ -109,22 +116,28 @@ export interface DashboardSummaryResponse {
   };
   kpis: {
     privateMarketsSales: number;
+    privateMarketsNetSales: number;
     privateMarketsTarget: number;
     privateMarketsTax: number;
     privateMarketsVariance: number;
     privateMarketsAchievementPct: number | null;
     directAndArmySales: number;
+    directAndArmyNetSales: number;
     directAndArmyTarget: number;
     directAndArmyAchievementPct: number | null;
     chainsSectorSales: number;
+    chainsSectorNetSales: number;
     chainsSectorTarget: number;
     chainsSectorAchievementPct: number | null;
     unlinkedSectorSales: number;
+    unlinkedSectorNetSales: number;
     unlinkedSectorCount: number;
     unlinkedBranchSales: number;
+    unlinkedBranchNetSales: number;
     unlinkedBranchCount: number;
     totalSourceRecords: number;
     totalSourceSales: number;
+    totalSourceNetSales: number;
     totalSourceTax: number;
   };
   sectors: SectorMetricRow[];
@@ -142,6 +155,7 @@ export interface DepartmentChainRow {
   commercialSales: number;
   industrialSales: number;
   sales: number;
+  netSales: number;
   tax: number;
   recordCount: number;
   shareOfSectorPct: number;
@@ -152,6 +166,7 @@ export interface BranchRepBreakdown {
   repCode: string;
   repName: string;
   sales: number;
+  netSales: number;
   tax: number;
   recordCount: number;
 }
@@ -168,6 +183,7 @@ export interface BranchMetricRow {
   repBreakdowns: BranchRepBreakdown[];
   target: number;
   sales: number;
+  netSales: number;
   tax: number;
   variance: number;
   achievementPct: number | null;
@@ -185,10 +201,13 @@ export interface UnlinkedRecordRow {
   soldToName: string;
   resolvedSector: string | null;
   salesValue: number;
+  netSalesValue: number;
   taxValue: number;
   itemCode: string;
   itemName: string;
 }
+
+export type RepTargetMode = 'auto' | 'manual';
 
 export interface RepMetricRow {
   repCode: string;
@@ -198,10 +217,18 @@ export interface RepMetricRow {
   sales: number;
   tax: number;
   target: number;
+  autoTarget: number;
+  manualTarget: number | null;
   achievementPct: number | null;
   recordCount: number;
   returnCount: number;
   branchCount: number;
+}
+
+export interface RepsAnalyticsResponse {
+  reps: RepMetricRow[];
+  targetMode: RepTargetMode;
+  diagnostics: BranchRepDiagnostics;
 }
 
 export interface BranchRepDiagnostics {
@@ -294,6 +321,7 @@ export interface SalesTransactionRow {
   repName: string;
   quantity: number;
   salesValue: number;
+  netSalesValue: number;
   taxValue: number;
   resolvedSector: string | null;
   resolvedDepartment: string | null;
@@ -323,8 +351,10 @@ export interface ImportPeriodSummary {
   period: string;
   vf05nCount: number;
   vf05nSalesTotal: number;
+  vf05nNetSalesTotal: number;
   zsalesCount: number;
   zsalesSalesTotal: number;
+  zsalesNetSalesTotal: number;
   action: 'replace' | 'add';
 }
 
@@ -369,9 +399,11 @@ export interface ImportBatchHistoryItem {
   status: 'active' | 'archived';
   vf05nCount: number;
   vf05nSalesTotal: number;
+  vf05nNetSalesTotal: number;
   vf05nTaxTotal: number;
   zsalesCount: number;
   zsalesSalesTotal: number;
+  zsalesNetSalesTotal: number;
   zsalesTaxTotal: number;
   unlinkedBranchCount: number;
   unlinkedSectorCount: number;

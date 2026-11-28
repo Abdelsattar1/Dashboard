@@ -15,9 +15,13 @@ import {
   getItemsAnalytics,
   getRepsAnalytics,
   getSalesTransactions,
+  getSavedRepTargetMode,
   getTimelineSeries,
   saveItemCategoryTargets,
+  saveRepManualTargets,
+  saveRepTargetMode,
   type ItemCategoryTargetInput,
+  type RepManualTargetInput,
 } from './server/analytics-engine.ts';
 import {
   createCompetition,
@@ -274,10 +278,49 @@ async function startServer() {
     const startDate = typeof req.query.startDate === 'string' ? req.query.startDate.trim() : undefined;
     const endDate = typeof req.query.endDate === 'string' ? req.query.endDate.trim() : undefined;
     const sector = typeof req.query.sector === 'string' ? req.query.sector.trim() : undefined;
+    const rawMode = typeof req.query.targetMode === 'string' ? req.query.targetMode.trim() : '';
+    const targetMode =
+      rawMode === 'manual' || rawMode === 'auto' ? rawMode : getSavedRepTargetMode(db);
 
-    const reps = getRepsAnalytics(db, req.user!, { source, startDate, endDate, sector });
+    const reps = getRepsAnalytics(db, req.user!, { source, startDate, endDate, sector, targetMode });
     const { diagnostics } = getBranchesAnalytics(db, req.user!, { source, startDate, endDate, sector });
-    res.json({ reps, diagnostics });
+    res.json({ reps, targetMode, diagnostics });
+  });
+
+  app.put('/api/analytics/reps/target-mode', requireAuth, requireTargetEditor, (req: AuthenticatedRequest, res) => {
+    const { targetMode } = req.body as { targetMode?: string };
+    if (targetMode !== 'auto' && targetMode !== 'manual') {
+      res.status(400).json({ error: 'وضع الأهداف غير صالح (يجب أن يكون auto أو manual)' });
+      return;
+    }
+    try {
+      const saved = saveRepTargetMode(db, targetMode, req.user!);
+      res.json({ success: true, targetMode: saved });
+    } catch (err) {
+      if (err instanceof AuthorizationError) {
+        res.status(403).json({ error: err.message });
+        return;
+      }
+      res.status(400).json({ error: err instanceof Error ? err.message : 'تعذر تحديث وضع أهداف المناديب' });
+    }
+  });
+
+  app.put('/api/analytics/reps/manual-targets', requireAuth, requireTargetEditor, (req: AuthenticatedRequest, res) => {
+    const { targets } = req.body as { targets?: RepManualTargetInput[] };
+    if (!Array.isArray(targets)) {
+      res.status(400).json({ error: 'صيغة أهداف المناديب غير صالحة' });
+      return;
+    }
+    try {
+      saveRepManualTargets(db, targets, req.user!);
+      res.json({ success: true });
+    } catch (err) {
+      if (err instanceof AuthorizationError) {
+        res.status(403).json({ error: err.message });
+        return;
+      }
+      res.status(400).json({ error: err instanceof Error ? err.message : 'تعذر حفظ الأهداف اليدوية للمناديب' });
+    }
   });
 
   app.get('/api/analytics/items', requireAuth, (req: AuthenticatedRequest, res) => {
@@ -499,9 +542,11 @@ async function startServer() {
       status: 'active' | 'archived';
       vf05n_count: number;
       vf05n_sales_total: number;
+      vf05n_net_sales_total?: number;
       vf05n_tax_total: number;
       zsales_count: number;
       zsales_sales_total: number;
+      zsales_net_sales_total?: number;
       zsales_tax_total: number;
       unlinked_branch_count: number;
       unlinked_sector_count: number;
@@ -516,9 +561,11 @@ async function startServer() {
       status: r.status,
       vf05nCount: r.vf05n_count,
       vf05nSalesTotal: r.vf05n_sales_total,
+      vf05nNetSalesTotal: r.vf05n_net_sales_total ?? 0,
       vf05nTaxTotal: r.vf05n_tax_total,
       zsalesCount: r.zsales_count,
       zsalesSalesTotal: r.zsales_sales_total,
+      zsalesNetSalesTotal: r.zsales_net_sales_total ?? 0,
       zsalesTaxTotal: r.zsales_tax_total,
       unlinkedBranchCount: r.unlinked_branch_count,
       unlinkedSectorCount: r.unlinked_sector_count,
