@@ -156,6 +156,14 @@ export default function App() {
   const activeNavMeta = NAV_ITEMS.find((i) => i.id === section);
   activeTabLabelRef.current = activeNavMeta?.label ?? 'لوحة المعلومات الرئيسية';
 
+  const isBenignDevSocketError = useCallback((message: string, stack = '', sourceUrl = '') => {
+    const combined = `${message}\n${stack}\n${sourceUrl}`.toLowerCase();
+    return (
+      combined.includes('websocket closed without opened') ||
+      (combined.includes('@vite/client') && combined.includes('websocket'))
+    );
+  }, []);
+
   const sendRuntimeErrorReport = useCallback(
     (payload: {
       kind: 'runtime_error' | 'unhandled_rejection' | 'react_error';
@@ -167,15 +175,18 @@ export default function App() {
     }) => {
       if (!userRef.current) return;
       const msg = String(payload.message || '').trim();
+      const stack = String(payload.stack || '').trim();
+      const sourceUrl = String(payload.sourceUrl || '').trim();
       if (!msg || msg.includes('/api/audit/runtime-errors')) return;
+      if (isBenignDevSocketError(msg, stack, sourceUrl)) return;
       apiRequest('/api/audit/runtime-errors', {
         method: 'POST',
         body: JSON.stringify({
           kind: payload.kind,
           tabName: activeTabLabelRef.current,
           message: msg.slice(0, 1000),
-          stack: String(payload.stack || '').slice(0, 4000),
-          sourceUrl: String(payload.sourceUrl || '').slice(0, 500),
+          stack: stack.slice(0, 4000),
+          sourceUrl: sourceUrl.slice(0, 500),
           lineNo: payload.lineNo || 0,
           colNo: payload.colNo || 0,
         }),
@@ -183,30 +194,54 @@ export default function App() {
         // Silent best-effort error capture
       });
     },
-    []
+    [isBenignDevSocketError]
   );
 
   useEffect(() => {
     const onWindowError = (event: ErrorEvent) => {
+      const msg =
+        (typeof event?.message === 'string' && event.message.trim()) ||
+        (event?.error instanceof Error ? event.error.message : '') ||
+        'Uncaught Window Error';
+      const stack = event?.error instanceof Error ? event.error.stack || '' : '';
+      const sourceUrl = event?.filename || '';
+      if (isBenignDevSocketError(msg, stack, sourceUrl)) {
+        event.preventDefault?.();
+        return;
+      }
       sendRuntimeErrorReport({
         kind: 'runtime_error',
-        message: event.message || (event.error instanceof Error ? event.error.message : 'Uncaught Window Error'),
-        stack: event.error instanceof Error ? event.error.stack || '' : '',
-        sourceUrl: event.filename || '',
-        lineNo: event.lineno || 0,
-        colNo: event.colno || 0,
+        message: msg,
+        stack,
+        sourceUrl,
+        lineNo: event?.lineno || 0,
+        colNo: event?.colno || 0,
       });
     };
 
     const onUnhandledRejection = (event: PromiseRejectionEvent) => {
-      const reason = event.reason;
-      const msg =
-        reason instanceof Error
-          ? reason.message
-          : typeof reason === 'string'
-            ? reason
-            : 'Unhandled Promise Rejection';
-      const stack = reason instanceof Error ? reason.stack || '' : '';
+      const reason = event?.reason;
+      let msg = 'Unhandled Promise Rejection';
+      let stack = '';
+      if (reason instanceof Error) {
+        msg = reason.message || reason.name || msg;
+        stack = reason.stack || '';
+      } else if (typeof reason === 'string' && reason.trim()) {
+        msg = reason.trim();
+      } else if (reason && typeof reason === 'object') {
+        const maybeMsg = (reason as { message?: unknown }).message;
+        const maybeStack = (reason as { stack?: unknown }).stack;
+        if (typeof maybeMsg === 'string' && maybeMsg.trim()) {
+          msg = maybeMsg.trim();
+        }
+        if (typeof maybeStack === 'string') {
+          stack = maybeStack;
+        }
+      }
+      if (isBenignDevSocketError(msg, stack)) {
+        event.preventDefault?.();
+        return;
+      }
       sendRuntimeErrorReport({
         kind: 'unhandled_rejection',
         message: msg,
@@ -220,7 +255,7 @@ export default function App() {
       window.removeEventListener('error', onWindowError);
       window.removeEventListener('unhandledrejection', onUnhandledRejection);
     };
-  }, [sendRuntimeErrorReport]);
+  }, [isBenignDevSocketError, sendRuntimeErrorReport]);
 
   const checkAuthStatus = useCallback(async () => {
     try {

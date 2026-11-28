@@ -566,6 +566,10 @@ export async function syncSupabaseToLocalDb(db: Database.Database, opts?: { forc
         ai_analysis: string;
         occurred_at: string;
       }>) {
+        const lowerErr = `${e.message || ''}\n${e.stack || ''}\n${e.source_url || ''}`.toLowerCase();
+        const isBenignWs =
+          lowerErr.includes('websocket closed without opened') ||
+          (lowerErr.includes('@vite/client') && lowerErr.includes('websocket'));
         insErr.run(
           e.id,
           e.kind,
@@ -577,7 +581,7 @@ export async function syncSupabaseToLocalDb(db: Database.Database, opts?: { forc
           e.col_no,
           e.user_id ?? null,
           e.username,
-          e.resolved ? 1 : 0,
+          e.resolved || isBenignWs ? 1 : 0,
           e.ai_analysis,
           e.occurred_at
         );

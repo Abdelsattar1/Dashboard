@@ -90,6 +90,27 @@ export function recordRuntimeError(
   const colNo = Number.isFinite(Number(input.colNo)) ? Math.max(0, Math.floor(Number(input.colNo))) : 0;
   const now = new Date().toISOString();
 
+  const combinedErr = `${message}\n${stack}\n${sourceUrl}`.toLowerCase();
+  if (
+    combinedErr.includes('websocket closed without opened') ||
+    (combinedErr.includes('@vite/client') && combinedErr.includes('websocket'))
+  ) {
+    return {
+      id: 0,
+      kind,
+      tabName,
+      message,
+      stack,
+      sourceUrl,
+      lineNo,
+      colNo,
+      username: user?.username ?? '',
+      resolved: true,
+      aiAnalysis: '',
+      occurredAt: now,
+    };
+  }
+
   // Deduplicate identical unresolved errors occurring within 60 seconds
   const recent = db
     .prepare(
@@ -183,6 +204,13 @@ function mapRuntimeErrorRow(r: {
 }
 
 export function listRuntimeErrorLogs(db: Database.Database, includeResolved = false): RuntimeErrorLog[] {
+  db.prepare(
+    `UPDATE runtime_error_logs
+     SET resolved = 1
+     WHERE resolved = 0
+       AND (lower(message) LIKE '%websocket closed without opened%'
+         OR (lower(stack) LIKE '%@vite/client%' AND lower(message) LIKE '%websocket%'))`
+  ).run();
   const sql = includeResolved
     ? `SELECT * FROM runtime_error_logs ORDER BY id DESC LIMIT 100`
     : `SELECT * FROM runtime_error_logs WHERE resolved = 0 ORDER BY id DESC LIMIT 100`;

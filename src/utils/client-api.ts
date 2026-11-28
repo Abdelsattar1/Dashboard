@@ -923,7 +923,7 @@ export async function handleClientApiRequest<T>(
       throw new ClientHttpError(400, 'رسالة الخطأ مطلوبة');
     }
     const log = recordRuntimeError(db, { id: u.id, username: u.username }, body);
-    if (useSupabase) {
+    if (useSupabase && log.id > 0) {
       supabaseInsertRuntimeError({
         kind: log.kind,
         tabName: log.tabName,
